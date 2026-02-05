@@ -21,7 +21,6 @@ const loadGoogleMapsScript = (apiKey) => {
 
 // --- Helper: Call Gemini AI ---
 const callGeminiAI = async (apiKey, shopName, userProfile, exclusions) => {
-  // แปลงค่างบประมาณเป็นข้อความสำหรับ AI
   const budgetText = userProfile.q_budget === 1 ? "Budget-friendly/Cheap/Street Food price" : userProfile.q_budget === 2 ? "Mid-range price" : "Premium/High-end price";
   
   const prompt = `
@@ -301,7 +300,19 @@ const FoodRandomizerApp = ({ userProfile, onRetakeQuiz, apiKeys, onUpdateKeys })
     setResult(null); 
     setRecommendedMenu(null);
 
-    // Check GPS support
+    // --- FIX: ถ้าไม่มี API Key -> ใช้ Mock ทันที (ไม่ต้องรอ GPS) ---
+    if (!apiKeys.googleMaps) {
+      setTimeout(() => {
+        const shuffled = [...mockNearbyPlaces].sort(() => 0.5 - Math.random());
+        const selected = shuffled.slice(0, 5); 
+        setOptions(prev => [...new Set([...prev, ...selected])]);
+        setIsLocating(false); 
+        setDisplayedOption("เจอแหล่งอาหารจำลอง!");
+      }, 1500);
+      return;
+    }
+    // --------------------------------------------------------
+
     if (!("geolocation" in navigator)) {
       alert("ไม่รองรับ GPS"); setIsLocating(false); return;
     }
@@ -310,44 +321,33 @@ const FoodRandomizerApp = ({ userProfile, onRetakeQuiz, apiKeys, onUpdateKeys })
       const { latitude, longitude } = pos.coords;
 
       // Try Google Maps API
-      if (apiKeys.googleMaps) {
-        try {
-          await loadGoogleMapsScript(apiKeys.googleMaps);
-          const service = new window.google.maps.places.PlacesService(document.createElement('div'));
-          const request = {
-            location: new window.google.maps.LatLng(latitude, longitude),
-            radius: '1000', // 1km
-            type: ['restaurant', 'food']
-          };
-          
-          service.nearbySearch(request, (results, status) => {
-            if (status === window.google.maps.places.PlacesServiceStatus.OK && results) {
-              const realPlaces = results.map(p => p.name).slice(0, 10); // Take top 10
-              setOptions(prev => { 
-                const uniqueNew = realPlaces.filter(s => !prev.includes(s)); 
-                return [...prev, ...uniqueNew]; 
-              });
-              setDisplayedOption("เจอร้านจริงแล้ว!");
-            } else {
-              setDisplayedOption("ไม่พบร้าน (Google Error)");
-            }
-            setIsLocating(false);
-          });
-          return;
-        } catch (err) {
-          console.error("Google Maps Error:", err);
-          // Fallback to mock if API fails
-        }
+      try {
+        await loadGoogleMapsScript(apiKeys.googleMaps);
+        const service = new window.google.maps.places.PlacesService(document.createElement('div'));
+        const request = {
+          location: new window.google.maps.LatLng(latitude, longitude),
+          radius: '1000', // 1km
+          type: ['restaurant', 'food']
+        };
+        
+        service.nearbySearch(request, (results, status) => {
+          if (status === window.google.maps.places.PlacesServiceStatus.OK && results) {
+            const realPlaces = results.map(p => p.name).slice(0, 10); // Take top 10
+            setOptions(prev => { 
+              const uniqueNew = realPlaces.filter(s => !prev.includes(s)); 
+              return [...prev, ...uniqueNew]; 
+            });
+            setDisplayedOption("เจอร้านจริงแล้ว!");
+          } else {
+            setDisplayedOption("ไม่พบร้าน (Google Error)");
+          }
+          setIsLocating(false);
+        });
+      } catch (err) {
+        console.error("Google Maps Error:", err);
+        setIsLocating(false);
+        setDisplayedOption("Error Loading Maps");
       }
-
-      // Mock Fallback
-      setTimeout(() => {
-        const shuffled = [...mockNearbyPlaces].sort(() => 0.5 - Math.random());
-        const selected = shuffled.slice(0, 5); 
-        setOptions(prev => [...prev, ...selected.filter(s => !prev.includes(s))]);
-        setIsLocating(false); 
-        setDisplayedOption(apiKeys.googleMaps ? "API ผิดพลาด ใช้ข้อมูลจำลอง" : "เจอแหล่งอาหารจำลอง!");
-      }, 1500);
 
     }, () => { alert("ไม่สามารถระบุตำแหน่ง"); setIsLocating(false); setDisplayedOption("หาไม่เจอ"); });
   };
@@ -516,8 +516,8 @@ const App = () => {
   
   // 🟢 แก้ตรงนี้: ใส่ Key ของคุณลงไปในเครื่องหมายคำพูดได้เลยครับ
   const [apiKeys, setApiKeys] = useState({ 
-    googleMaps: 'ใส่_GOOGLE_MAPS_KEY_ของคุณตรงนี้', 
-    gemini: 'ใส่_GEMINI_KEY_ของคุณตรงนี้' 
+    googleMaps: '', 
+    gemini: '' 
   });
 
   const handleStart = () => setAppState('quiz');
