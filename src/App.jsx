@@ -1,168 +1,358 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { 
   Utensils, Plus, Trash2, RefreshCw, ChefHat, Sparkles, Dices, 
   MapPin, Settings, X, AlertCircle, Youtube, Play, ArrowRight, 
-  CheckCircle2, Flame, Leaf, Beef, Wheat, Soup, Clock, Key, Banknote
+  CheckCircle2, Flame, Leaf, Beef, Wheat, Soup, Clock, Key, Banknote,
+  Coffee, IceCream, Heart, Star, Ban, MessageSquare, Edit3, Activity, Info, Camera, CheckSquare, Square, Image, ImageOff,
+  Check, Loader2
 } from 'lucide-react';
 
-// --- Helper: Load Google Maps Script ---
-const loadGoogleMapsScript = (apiKey) => {
-  return new Promise((resolve, reject) => {
-    if (window.google && window.google.maps) { resolve(); return; }
-    const script = document.createElement('script');
-    script.src = `https://maps.googleapis.com/maps/api/js?key=${apiKey}&libraries=places`;
-    script.async = true;
-    script.defer = true;
-    script.onload = () => resolve();
-    script.onerror = (err) => reject(err);
-    document.head.appendChild(script);
-  });
+// --- Global Config: Gemini Keys Pool ---
+const GEMINI_KEYS_POOL = [
+  "AIzaSyDU3Of7YjLJU4uEfKNeiy6hpDYSr7kCEwo",
+  "AIzaSyCAc26wgrxEGV4hSaNkzvpKg1dlhQSdJ7k",
+  "AIzaSyCRzGTiaupHvF3I-sqDeqdxv82-UREne_w"
+];
+
+// --- Helper: Call Gemini with Key Rotation ---
+const fetchGeminiWithRotation = async (payload, userProvidedKey = '') => {
+  const customKeys = userProvidedKey ? [userProvidedKey] : [];
+  const keysToTry = [...customKeys, ...GEMINI_KEYS_POOL];
+
+  for (const key of keysToTry) {
+    try {
+      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${key}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+
+      const data = await response.json();
+
+      if (!response.ok || data.error) {
+        console.warn(`Key ${key.substring(0, 10)}... failed. Switching to next key.`);
+        throw new Error(data.error?.message || "Gemini Error");
+      }
+      return data;
+    } catch (err) {
+      if (key === keysToTry[keysToTry.length - 1]) {
+        console.error("All Gemini keys failed.");
+        throw err;
+      }
+    }
+  }
 };
 
-// --- Helper: Call Gemini AI ---
-const callGeminiAI = async (apiKey, shopName, userProfile, exclusions) => {
-  const budgetText = userProfile.q_budget === 1 ? "Budget-friendly/Cheap/Street Food price" : userProfile.q_budget === 2 ? "Mid-range price" : "Premium/High-end price";
-  
-  const prompt = `
-    Context: You are a local food expert in Thailand.
-    Task: Suggest ONE specific recommended menu item from the restaurant named "${shopName}".
-    
-    User Profile:
-    - Budget Level: ${budgetText}
-    - Spicy Preference: ${userProfile.q_spicy}/5
-    - Vegetable Preference: ${userProfile.q_veg_ratio}/5
-    - Meat Preference: ${userProfile.q_meat_lover}/5
-    - Avoid/Allergies: ${exclusions.join(', ') || "None"}
-    
-    Constraints:
-    1. Answer ONLY with the menu name in Thai.
-    2. Do not add explanations.
-    3. Make sure the menu matches the budget level requested.
-    4. If the restaurant is generic (e.g., "7-Eleven"), suggest a popular item matching the profile.
+// --- Helper: Call Overpass API (OpenStreetMap) ---
+const fetchNearbyPlacesOSM = async (lat, lon, radius = 1000, retry = 1) => {
+  const query = `
+    [out:json][timeout:25];
+    (
+      node["amenity"~"restaurant|cafe|fast_food|food_court|street_vendor"](around:${radius},${lat},${lon});
+      way["amenity"~"restaurant|cafe|fast_food|food_court|street_vendor"](around:${radius},${lat},${lon});
+    );
+    out body;
+    >;
+    out skel qt;
   `;
 
   try {
-    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
-    });
+    const response = await fetch(
+      'https://overpass.kumi.systems/api/interpreter', 
+      { method: 'POST', body: query }
+    );
+
     const data = await response.json();
-    return data.candidates[0].content.parts[0].text.trim();
+    const places = data.elements
+      .filter(el => el.tags && (el.tags.name || el.tags['name:en']))
+      .map(el => el.tags.name || el.tags['name:en']);
+
+    const uniquePlaces = [...new Set(places)];
+
+    if (uniquePlaces.length === 0 && retry > 0) {
+      await new Promise(r => setTimeout(r, 800));
+      return fetchNearbyPlacesOSM(lat, lon, radius, retry - 1);
+    }
+
+    return uniquePlaces;
   } catch (error) {
-    console.error("AI Error:", error);
-    return null; // Fallback to local logic
+    console.error("Overpass API Error:", error);
+    return [];
   }
 };
 
-// --- ข้อมูลคำถาม (Quiz Data) ---
+// --- Helper: Image Cache ---
+const imageCache = {};
+
+// --- Helper: Fetch Image from Unsplash ---
+const fetchUnsplashImage = async (query, accessKey) => {
+  if (!accessKey || !query || query === "N/A" || query.includes("Error")) return null;
+  if (imageCache[query]) return imageCache[query];
+  
+  try {
+    const response = await fetch(`https://api.unsplash.com/search/photos?page=1&query=${encodeURIComponent(query)}&per_page=1&orientation=landscape&content_filter=high&client_id=${accessKey}`);
+    const data = await response.json();
+    if (data && data.results && Array.isArray(data.results) && data.results.length > 0) {
+      const imageUrl = data.results[0].urls.regular;
+      imageCache[query] = imageUrl;
+      return imageUrl;
+    }
+    return null;
+  } catch (error) {
+    console.error("Unsplash Error:", error);
+    return null;
+  }
+};
+
+// --- Helper: Call Gemini AI (Selection) ---
+const callGeminiAI = async (apiKey, shopName, userProfile, exclusions, allergy, priceRange, selectedTypes, slotToReroll = null) => {
+  // Fix: Handle 0 value correctly (don't fallback to 3 if value is 0)
+  const getScore = (val) => (val !== undefined && val !== null) ? val : 3; 
+  const budgetText = `${priceRange.min} - ${priceRange.max} THB`;
+
+  let requestedFields = [];
+  if (selectedTypes.food) requestedFields.push(`"food": "Thai menu name"`);
+  if (selectedTypes.drink) requestedFields.push(`"drink": "Beverage menu name"`);
+  if (selectedTypes.dessert) requestedFields.push(`"dessert": "Dessert menu name"`);
+
+  if (requestedFields.length === 0 && !slotToReroll) return {};
+
+  let taskDescription = `Analyze the REAL restaurant "${shopName}" in Thailand. Suggest items for [${Object.keys(selectedTypes).filter(k => selectedTypes[k]).join(', ')}] that ACTUALLY exist on their menu.`;
+  let outputFormat = `Return ONLY a JSON object with keys: ${requestedFields.join(', ')}. Values MUST be strings.`;
+
+  if (slotToReroll) {
+    taskDescription = `Look up the menu for "${shopName}". Suggest ONLY a recommended "${slotToReroll}" item.`;
+    outputFormat = `Return ONLY a JSON object with a single key: "${slotToReroll}". Value MUST be a string.`;
+  }
+
+  const prompt = `
+    Context: You are a Thai local expert.
+    Task: ${taskDescription}
+    
+    User Profile:
+    - Budget: ${budgetText} (Allocate this budget across the SELECTED items only)
+    - Preferences: Spicy(${getScore(userProfile.q_spicy)}/5), Veg(${getScore(userProfile.q_veg_ratio)}/5)
+    - Allergies: ${allergy || "None"} (STRICTLY AVOID)
+    - Exclusions: ${exclusions.join(', ')}
+    
+    ${outputFormat}
+    Constraint: If the shop type doesn't support a category (e.g. A coffee shop usually doesn't have Main Food), return "N/A" for that key. Do not return objects or arrays as values.
+  `;
+
+  try {
+    const data = await fetchGeminiWithRotation({ 
+      contents: [{ parts: [{ text: prompt }] }], 
+      generationConfig: { responseMimeType: "application/json" } 
+    }, apiKey);
+    
+    let text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (!text) return null;
+
+    text = text.replace(/```json|```/g, '').trim();
+    
+    let result;
+    try {
+        result = JSON.parse(text);
+    } catch (e) {
+        console.error("JSON Parse Error:", e);
+        return null;
+    }
+
+    if (!result || typeof result !== 'object') return null;
+
+    Object.keys(result).forEach(key => {
+        if (typeof result[key] !== 'string') {
+            result[key] = String(result[key] || "N/A"); 
+        }
+    });
+
+    return result;
+  } catch (error) {
+    console.error("AI Error:", error);
+    return null; 
+  }
+};
+
+// --- Helper: Call Gemini AI (Analysis) ---
+const callGeminiAnalysis = async (apiKey, mealSet) => {
+  const itemsToAnalyze = [];
+  if (mealSet.food && mealSet.food !== "N/A") itemsToAnalyze.push(`Main: ${mealSet.food}`);
+  if (mealSet.drink && mealSet.drink !== "N/A") itemsToAnalyze.push(`Drink: ${mealSet.drink}`);
+  if (mealSet.dessert && mealSet.dessert !== "N/A") itemsToAnalyze.push(`Dessert: ${mealSet.dessert}`);
+
+  if (itemsToAnalyze.length === 0) return null;
+
+  const prompt = `
+    Role: Thai Nutritionist.
+    Analyze this set from ${mealSet.shop}: ${itemsToAnalyze.join(', ')}.
+    Output JSON:
+    {
+      "calories": integer (total kcal),
+      "comment": "short witty thai comment",
+      "health_tip": "short thai health tip",
+      "score": integer (1-10)
+    }
+  `;
+
+  try {
+    const data = await fetchGeminiWithRotation({ 
+      contents: [{ parts: [{ text: prompt }] }], 
+      generationConfig: { responseMimeType: "application/json" } 
+    }, apiKey);
+
+    let text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (!text) return null;
+    text = text.replace(/```json|```/g, '').trim();
+    return JSON.parse(text);
+  } catch (error) {
+    return null;
+  }
+};
+
 const QUIZ_CATEGORIES = [
   {
-    id: 'budget',
-    title: '💰 งบประมาณต่อมื้อ',
-    color: 'text-blue-600',
-    bg: 'bg-blue-50',
-    questions: [
-      { 
-        id: 'q_budget', 
-        text: 'งบประมาณที่คุณตั้งไว้ในมื้อนี้',
-        isBudget: true,
-        options: [
-          { value: 1, label: "ประหยัด (หลักสิบ-ร้อยต้น)", icon: "🥣" },
-          { value: 2, label: "ปานกลาง (ร้อยปลาย-สามร้อย)", icon: "🍱" },
-          { value: 3, label: "พรีเมียม (หรูหรา/จัดเต็ม)", icon: "🥂" }
-        ]
-      }
-    ]
+    id: 'distance', title: '📍 ระยะทาง (กม.)', color: 'text-indigo-600', bg: 'bg-indigo-50',
+    questions: [{ id: 'q_distance', text: 'ค้นหาร้านไกลแค่ไหน?', isDistance: true }]
   },
   {
-    id: 'flavor',
-    title: '🌶️ กลุ่มรสชาติ (Flavor)',
-    color: 'text-red-500',
-    bg: 'bg-red-50',
-    questions: [
-      { id: 'q_spicy', text: 'คุณกิน "เผ็ด" ได้มากแค่ไหน' },
-      { id: 'q_strong', text: 'คุณชอบอาหาร "รสจัด" (เค็ม-เปรี้ยว-เข้มข้น) แค่ไหน' },
-      { id: 'q_mild', text: 'คุณชอบอาหาร "รสอ่อน/จืด" แค่ไหน' }
-    ]
+    id: 'budget', title: '💰 งบประมาณ (บาท/มื้อ)', color: 'text-blue-600', bg: 'bg-blue-50',
+    questions: [{ id: 'q_budget', text: 'ลากเส้นกำหนดช่วงราคา', isPriceRange: true }]
   },
   {
-    id: 'veg',
-    title: '🥦 กลุ่มผัก & ความเบา',
-    color: 'text-green-500',
-    bg: 'bg-green-50',
-    questions: [
-      { id: 'q_veg_ratio', text: 'คุณกิน "ผัก" เป็นสัดส่วนมากแค่ไหนในมื้อหนึ่ง' },
-      { id: 'q_light', text: 'คุณชอบอาหารที่ "ไม่มัน / ไม่หนักท้อง" แค่ไหน' },
-      { id: 'q_fresh', text: 'คุณรู้สึกสบายตัวกว่าหลังมื้อที่มี "ผักเยอะ" แค่ไหน' }
-    ]
+    id: 'flavor', title: '🌶️ ความเผ็ด', color: 'text-red-500', bg: 'bg-red-50',
+    questions: [{ id: 'q_spicy', text: '' }]
   },
   {
-    id: 'protein',
-    title: '🥩 กลุ่มโปรตีน & ความหนัก',
-    color: 'text-orange-600',
-    bg: 'bg-orange-50',
-    questions: [
-      { id: 'q_meat_lover', text: 'คุณชอบอาหารที่มี "เนื้อสัตว์เป็นหลัก" แค่ไหน' },
-      { id: 'q_full', text: 'คุณชอบอาหารที่กินแล้ว "อิ่มแน่น / อยู่ท้องนาน" แค่ไหน' },
-      { id: 'q_greasy', text: 'คุณมักเลือกเมนู "ย่าง / ทอด / ฉ่ำ" แค่ไหน' }
-    ]
-  },
-  {
-    id: 'carb',
-    title: '🍜 กลุ่มคาร์โบไฮเดรต',
-    color: 'text-yellow-600',
-    bg: 'bg-yellow-50',
-    questions: [
-      { id: 'q_carb_need', text: 'คุณต้องการ "ข้าวหรือเส้น" ในมื้ออาหารมากแค่ไหน' },
-      { id: 'q_carb_addict', text: 'ถ้ามื้อไหนไม่มีแป้ง คุณรู้สึกว่า "ยังไม่ใช่มื้อจริง" แค่ไหน' }
-    ]
-  },
-  {
-    id: 'cooking',
-    title: '🔥 กลุ่มวิธีปรุง',
-    color: 'text-red-400',
-    bg: 'bg-red-50',
-    questions: [
-      { id: 'q_fry', text: 'คุณชอบอาหาร "ทอด" แค่ไหน' },
-      { id: 'q_stir', text: 'คุณชอบอาหาร "ผัด" แค่ไหน' },
-      { id: 'q_boil', text: 'คุณชอบอาหาร "ต้ม / นึ่ง / ลวก" แค่ไหน' },
-      { id: 'q_raw', text: 'คุณชอบอาหารแนว "ยำ / ดิบ / สด" แค่ไหน' }
-    ]
-  },
-  {
-    id: 'convenience',
-    title: '⏱️ ความง่าย & ราคา',
-    color: 'text-blue-500',
-    bg: 'bg-blue-50',
-    questions: [
-      { id: 'q_easy', text: 'คุณชอบเมนูที่ "กินง่าย เร็ว ไม่ต้องคิดมาก" แค่ไหน' },
-      { id: 'q_routine', text: 'คุณมักเลือกเมนู "เดิมๆ ที่คุ้นเคย" แค่ไหน' }
-    ]
+    id: 'veg', title: '🥦 ปริมาณผัก', color: 'text-green-500', bg: 'bg-green-50',
+    questions: [{ id: 'q_veg_ratio', text: '' }]
   }
 ];
+
+// --- Sub-Component: Distance Slider ---
+const DistanceInput = ({ value, onChange }) => {
+  const currentDist = value || 1;
+  return (
+    <div className="w-full space-y-4 p-4 bg-white rounded-xl border border-slate-200 shadow-sm">
+      <div className="flex justify-between items-center">
+        <label className="text-[10px] text-slate-400 font-bold uppercase">รัศมีค้นหา</label>
+        <div className="text-xl font-black text-indigo-600">{currentDist} <span className="text-sm text-slate-500">กม.</span></div>
+      </div>
+      <input type="range" min="1" max="10" step="0.5" value={currentDist} onChange={(e) => onChange(parseFloat(e.target.value))} className="w-full h-2 bg-slate-100 rounded-lg appearance-none cursor-pointer accent-indigo-600"/>
+      <div className="flex justify-between text-[10px] text-slate-400"><span>เดินไปได้ (1 กม.)</span><span>ขับรถไป (10 กม.)</span></div>
+    </div>
+  );
+};
+
+// --- Sub-Component: Dual Price Range Slider ---
+const PriceRangeInput = ({ value, onChange }) => {
+  const minLimit = 1; const maxLimit = 999;
+  const currentMin = value?.min ?? 50; const currentMax = value?.max ?? 300;
+
+  const handleMinSliderChange = (e) => onChange({ ...value, min: Math.min(Number(e.target.value), currentMax - 1) });
+  const handleMaxSliderChange = (e) => onChange({ ...value, max: Math.max(Number(e.target.value), currentMin + 1) });
+  const handleMinTextChange = (e) => { let val = parseInt(e.target.value) || 0; if (val > currentMax) val = currentMax; onChange({ ...value, min: val }); };
+  const handleMaxTextChange = (e) => { let val = parseInt(e.target.value) || 0; if (val < currentMin) val = currentMin; if (val > maxLimit) val = maxLimit; onChange({ ...value, max: val }); };
+
+  const minPercent = ((currentMin - minLimit) / (maxLimit - minLimit)) * 100;
+  const maxPercent = ((currentMax - minLimit) / (maxLimit - minLimit)) * 100;
+
+  return (
+    <div className="w-full space-y-6 p-4 bg-white rounded-xl border border-slate-200 shadow-sm">
+      <div className="relative h-6 mt-2 select-none">
+        <div className="absolute top-1/2 -translate-y-1/2 w-full h-2 bg-slate-100 rounded-full"></div>
+        <div className="absolute top-1/2 -translate-y-1/2 h-2 bg-orange-500 rounded-full opacity-80" style={{ left: `${minPercent}%`, width: `${maxPercent - minPercent}%` }}></div>
+        <input type="range" min={minLimit} max={maxLimit} value={currentMin} onChange={handleMinSliderChange} className="absolute top-1/2 -translate-y-1/2 w-full h-2 appearance-none bg-transparent pointer-events-none [&::-webkit-slider-thumb]:pointer-events-auto [&::-webkit-slider-thumb]:w-6 [&::-webkit-slider-thumb]:h-6 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:border-2 [&::-webkit-slider-thumb]:border-orange-500 [&::-webkit-slider-thumb]:shadow-md [&::-webkit-slider-thumb]:appearance-none z-20" />
+        <input type="range" min={minLimit} max={maxLimit} value={currentMax} onChange={handleMaxSliderChange} className="absolute top-1/2 -translate-y-1/2 w-full h-2 appearance-none bg-transparent pointer-events-none [&::-webkit-slider-thumb]:pointer-events-auto [&::-webkit-slider-thumb]:w-6 [&::-webkit-slider-thumb]:h-6 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:border-2 [&::-webkit-slider-thumb]:border-orange-500 [&::-webkit-slider-thumb]:shadow-md [&::-webkit-slider-thumb]:appearance-none z-30" />
+      </div>
+      <div className="flex items-center gap-4">
+        <div className="flex-1"><label className="text-[10px] text-slate-400 font-bold uppercase">เริ่มต้น</label><div className="relative"><input type="number" value={currentMin} onChange={handleMinTextChange} className="w-full font-bold text-lg text-slate-700 border-b-2 border-slate-100 focus:border-orange-500 outline-none py-1 pl-1 transition-colors" /><span className="absolute right-0 bottom-1 text-xs text-slate-300">฿</span></div></div>
+        <div className="text-slate-300 font-bold">-</div>
+        <div className="flex-1 text-right"><label className="text-[10px] text-slate-400 font-bold uppercase">สูงสุด</label><div className="relative"><input type="number" value={currentMax} onChange={handleMaxTextChange} className="w-full font-bold text-lg text-slate-700 border-b-2 border-slate-100 focus:border-orange-500 outline-none py-1 pr-4 text-right transition-colors" /><span className="absolute right-0 bottom-1 text-xs text-slate-300">฿</span></div></div>
+      </div>
+    </div>
+  );
+};
 
 // --- Sub-Component: API Key Modal ---
 const ApiKeyModal = ({ isOpen, onClose, onSave, existingKeys }) => {
   const [keys, setKeys] = useState(existingKeys);
+  const [isValidating, setIsValidating] = useState(false);
+  const [statusMsg, setStatusMsg] = useState(null);
+
   if (!isOpen) return null;
+
+  const handleSave = async () => {
+    // Validate custom key if provided
+    if (keys.gemini && !GEMINI_KEYS_POOL.includes(keys.gemini)) {
+       setIsValidating(true); setStatusMsg(null);
+       try {
+         // Test User Key
+         await fetchGeminiWithRotation({ contents: [{ parts: [{ text: "Test" }] }] }, keys.gemini);
+       } catch (err) {
+         setStatusMsg("Key ที่ใส่มาใช้ไม่ได้ครับ (แต่ระบบจะใช้ Key สำรองให้)");
+         // Still save it, maybe quota issue
+       } finally {
+         setIsValidating(false);
+       }
+    }
+    onSave(keys);
+    onClose();
+  };
+
   return (
-    <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
-      <div className="bg-white rounded-3xl p-8 w-full max-w-md shadow-2xl animate-in zoom-in-95 duration-200">
-        <h2 className="text-xl font-bold text-slate-800 mb-2 flex items-center gap-2"><Key size={20} className="text-orange-500" /> API Keys Config</h2>
-        <p className="text-sm text-slate-500 mb-6">ตั้งค่าเพื่อดึงร้านจริงและใช้ AI เลือกเมนู</p>
+    <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4 backdrop-blur-sm animate-in fade-in">
+      <div className="bg-white rounded-3xl p-8 w-full max-w-md shadow-2xl">
+        <h2 className="text-xl font-bold mb-4 flex items-center gap-2"><Key size={20} className="text-orange-500"/> ตั้งค่าระบบ</h2>
         <div className="space-y-4">
-          <div>
-            <label className="block text-xs font-bold text-slate-700 mb-1 uppercase tracking-wider">Google Maps Key</label>
-            <input type="password" value={keys.googleMaps} onChange={(e) => setKeys({...keys, googleMaps: e.target.value})} className="w-full px-4 py-3 bg-slate-50 border-0 rounded-xl text-sm focus:ring-2 focus:ring-orange-500 outline-none" placeholder="AIza..." />
+          <div className="bg-green-50 p-3 rounded-xl border border-green-200">
+             <div className="flex items-center gap-2 text-green-700 font-bold text-sm mb-1"><CheckCircle2 size={16}/> ระบบ AI พร้อมใช้งาน</div>
+             <p className="text-xs text-green-600">มี API Key สำรองในระบบแล้ว 3 ชุด (สลับให้อัตโนมัติ)</p>
           </div>
           <div>
-            <label className="block text-xs font-bold text-slate-700 mb-1 uppercase tracking-wider">Gemini AI Key</label>
-            <input type="password" value={keys.gemini} onChange={(e) => setKeys({...keys, gemini: e.target.value})} className="w-full px-4 py-3 bg-slate-50 border-0 rounded-xl text-sm focus:ring-2 focus:ring-orange-500 outline-none" placeholder="AIza..." />
+            <label className="text-xs font-bold text-slate-600 ml-1">ใส่ Key ของตัวเอง (ถ้าต้องการ)</label>
+            <input type="password" value={keys.gemini} onChange={(e) => { setKeys({...keys, gemini: e.target.value}); setStatusMsg(null); }} className={`w-full p-3 border rounded-xl outline-none focus:ring-2 transition-all ${statusMsg ? 'border-red-500 ring-1 ring-red-500' : 'focus:ring-orange-500'}`} placeholder="Gemini API Key (Optional)" />
+            {statusMsg && <p className="text-xs text-red-500 mt-1 ml-1 font-bold">{statusMsg}</p>}
+          </div>
+          <div>
+            <label className="text-xs font-bold text-slate-600 ml-1">Unsplash Access Key (สำหรับรูปภาพ)</label>
+            <input type="password" value={keys.unsplash} onChange={(e) => setKeys({...keys, unsplash: e.target.value})} className="w-full p-3 border rounded-xl outline-none focus:ring-2 focus:ring-blue-500" placeholder="ใส่ Access Key จาก Unsplash Developers" />
           </div>
         </div>
-        <button onClick={() => { onSave(keys); onClose(); }} className="w-full mt-8 py-3 bg-slate-900 text-white font-bold rounded-xl hover:bg-slate-800 transition-colors">บันทึกการตั้งค่า</button>
-        <button onClick={onClose} className="w-full mt-2 py-3 text-slate-400 text-sm font-medium hover:text-slate-600">ไว้ทีหลัง</button>
+        <div className="flex gap-2 mt-6">
+          <button onClick={onClose} className="flex-1 py-3 text-slate-500 rounded-xl hover:bg-slate-50">ปิด</button>
+          <button onClick={handleSave} disabled={isValidating} className={`flex-1 py-3 text-white rounded-xl font-bold flex items-center justify-center gap-2 ${isValidating ? 'bg-slate-400' : 'bg-slate-900 hover:bg-slate-800'}`}>{isValidating ? <Loader2 size={18} className="animate-spin"/> : <Check size={18}/>} {isValidating ? 'ตรวจสอบ...' : 'บันทึก'}</button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// --- Sub-Component: Favorites Modal ---
+const FavoritesModal = ({ isOpen, onClose, favorites, onRemove, onUpdateReview }) => {
+  if (!isOpen) return null;
+  return (
+    <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4 backdrop-blur-sm animate-in fade-in">
+      <div className="bg-white rounded-3xl w-full max-w-lg shadow-2xl h-[80vh] flex flex-col">
+        <div className="p-6 border-b flex justify-between items-center bg-orange-50 rounded-t-3xl">
+          <h2 className="text-xl font-bold text-orange-800 flex items-center gap-2"><Heart className="fill-orange-500 text-orange-500"/> รายการโปรด</h2>
+          <button onClick={onClose}><X className="text-slate-400 hover:text-slate-600"/></button>
+        </div>
+        <div className="flex-1 overflow-y-auto p-6 space-y-4">
+          {favorites.length === 0 ? <p className="text-center text-slate-400 mt-10">ยังไม่มีรายการโปรด</p> : favorites.map(fav => (
+            <div key={fav.id} className="bg-white border rounded-2xl p-4 shadow-sm hover:shadow-md transition-shadow relative group">
+              <button onClick={() => onRemove(fav.id)} className="absolute top-2 right-2 text-slate-300 hover:text-red-500"><Trash2 size={16}/></button>
+              <div className="flex gap-4 mb-3">
+                {fav.image ? <img src={fav.image} alt={fav.name} className="w-16 h-16 rounded-lg object-cover bg-slate-100"/> : <div className="w-16 h-16 rounded-lg bg-slate-100 flex items-center justify-center text-xs text-slate-400"><ImageOff size={24}/></div>}
+                <div>
+                  <div className="text-xs font-bold text-orange-500 uppercase tracking-wide">{fav.type}</div>
+                  <h3 className="font-bold text-slate-800 text-lg">{fav.name}</h3>
+                  <div className="text-xs text-slate-500 flex items-center gap-1"><MapPin size={10}/> {fav.shop}</div>
+                </div>
+              </div>
+              <textarea placeholder="โน้ต..." value={fav.comment || ''} onChange={(e) => onUpdateReview(fav.id, fav.rating, e.target.value)} className="w-full bg-white border rounded-lg p-2 text-xs focus:ring-1 focus:ring-orange-300 outline-none resize-none" rows={1}/>
+            </div>
+          ))}
+        </div>
       </div>
     </div>
   );
@@ -170,376 +360,430 @@ const ApiKeyModal = ({ isOpen, onClose, onSave, existingKeys }) => {
 
 // --- Sub-Component: Quiz UI ---
 const PreferenceQuiz = ({ onFinish }) => {
-  const [currentCatIndex, setCurrentCatIndex] = useState(0);
-  const [answers, setAnswers] = useState({});
-  const currentCategory = QUIZ_CATEGORIES[currentCatIndex];
-  const isLastCategory = currentCatIndex === QUIZ_CATEGORIES.length - 1;
-  const isCategoryComplete = currentCategory.questions.every(q => answers[q.id]);
+  const [answers, setAnswers] = useState({ priceRange: { min: 50, max: 300 }, distance: 1 });
   const handleRate = (qId, score) => setAnswers(prev => ({ ...prev, [qId]: score }));
+  const handlePriceChange = (val) => setAnswers(prev => ({ ...prev, priceRange: val }));
+  const handleDistanceChange = (val) => setAnswers(prev => ({ ...prev, distance: val }));
+  const handleSubmit = () => {
+    const finalAnswers = { ...answers };
+    QUIZ_CATEGORIES.forEach(cat => { 
+        cat.questions.forEach(q => { 
+            // Fix: Check for undefined specifically, allowing 0
+            if (!q.isPriceRange && !q.isDistance && finalAnswers[q.id] === undefined) {
+                finalAnswers[q.id] = 3; 
+            }
+        }); 
+    });
+    onFinish(finalAnswers);
+  };
 
   return (
-    <div className="min-h-screen bg-white pb-20">
-      <header className="sticky top-0 bg-white/95 backdrop-blur z-20 border-b border-slate-100 px-4 py-4">
-        <div className="max-w-xl mx-auto flex items-center justify-between">
-           <h2 className="font-bold text-slate-800">สำรวจความหิว</h2>
-           <div className="text-xs font-bold text-orange-500 bg-orange-50 px-3 py-1 rounded-full">{currentCatIndex + 1} / {QUIZ_CATEGORIES.length}</div>
-        </div>
-        <div className="h-1 bg-slate-100 mt-4 w-full max-w-xl mx-auto rounded-full overflow-hidden">
-          <div className="h-full bg-orange-500 transition-all duration-500" style={{ width: `${((currentCatIndex + 1) / QUIZ_CATEGORIES.length) * 100}%` }} />
+    <div className="min-h-screen bg-white pb-28">
+      <header className="sticky top-0 bg-white/95 backdrop-blur-md z-20 border-b px-4 py-4 shadow-sm">
+        <div className="max-w-xl mx-auto flex justify-between items-center">
+          <h2 className="font-bold text-slate-800 text-lg">สำรวจความหิว (ข้ามได้)</h2>
+          <button onClick={handleSubmit} className="text-xs font-bold text-orange-600 bg-orange-50 px-4 py-2 rounded-full hover:bg-orange-100 transition-colors">ข้ามไปสุ่มเลย</button>
         </div>
       </header>
-      <main className="max-w-xl mx-auto px-6 py-10 space-y-12">
-        <div className={`p-6 rounded-3xl ${currentCategory.bg} animate-in fade-in slide-in-from-bottom-4`}>
-          <h1 className={`text-2xl font-black ${currentCategory.color} mb-1`}>{currentCategory.title}</h1>
-          <p className="text-sm text-slate-600 opacity-80">
-            {currentCategory.id === 'budget' ? 'เลือกงบประมาณที่ต้องการ' : 'ระดับ 1 (น้อยมาก) ถึง 5 (มากเป็นพิเศษ)'}
-          </p>
-        </div>
-        {currentCategory.questions.map((q) => (
-          <div key={q.id} className="space-y-6">
-            <p className="font-bold text-slate-800 text-xl leading-relaxed">{q.text}</p>
-            {q.isBudget ? (
-              <div className="space-y-3">
-                {q.options.map((opt) => (
-                  <button key={opt.value} onClick={() => handleRate(q.id, opt.value)} className={`w-full p-4 rounded-2xl border-2 text-left transition-all flex items-center gap-4 ${answers[q.id] === opt.value ? 'border-orange-500 bg-orange-50' : 'border-slate-100 hover:border-slate-200'}`}>
-                    <span className="text-2xl">{opt.icon}</span>
-                    <span className={`font-bold ${answers[q.id] === opt.value ? 'text-orange-700' : 'text-slate-600'}`}>{opt.label}</span>
-                  </button>
-                ))}
-              </div>
-            ) : (
-              <div className="flex justify-between gap-2">
-                {[1, 2, 3, 4, 5].map((score) => (
-                  <button key={score} onClick={() => handleRate(q.id, score)} className={`flex-1 h-14 rounded-2xl font-black text-lg transition-all transform active:scale-95 ${answers[q.id] === score ? 'bg-orange-500 text-white shadow-lg scale-105' : 'bg-slate-100 text-slate-400 hover:bg-slate-200'}`}>{score}</button>
-                ))}
-              </div>
-            )}
+      <main className="max-w-xl mx-auto px-4 py-6 space-y-8">
+        {QUIZ_CATEGORIES.map((cat) => (
+          <div key={cat.id} className="space-y-4">
+            <div className={`px-2 py-1 rounded-lg inline-block ${cat.bg}`}><h1 className={`text-lg font-black ${cat.color} flex items-center gap-2`}>{cat.title}</h1></div>
+            <div className="space-y-6 px-2">
+              {cat.questions.map((q) => (
+                <div key={q.id} className="space-y-3">
+                  {q.isPriceRange ? (<PriceRangeInput value={answers.priceRange} onChange={handlePriceChange} />) : 
+                   q.isDistance ? (<DistanceInput value={answers.distance} onChange={handleDistanceChange} />) : (
+                    <>
+                      {q.text && <p className="font-bold text-slate-700">{q.text}</p>}
+                      <div className="flex justify-between mb-1 px-1"><span className="text-[10px] text-slate-400">ไม่เลย</span><span className="text-[10px] text-slate-400">มาก</span></div>
+                      <div className="flex gap-2">{[0, 1, 2, 3, 4, 5].map(score => (<button key={score} onClick={() => handleRate(q.id, score)} className={`flex-1 h-10 rounded-lg font-bold text-sm transition-all transform active:scale-95 border ${answers[q.id] === score ? 'bg-orange-500 text-white border-orange-500 shadow-md scale-105' : 'bg-slate-50 text-slate-400 border-slate-100 hover:bg-slate-100'}`}>{score}</button>))}</div>
+                    </>
+                  )}
+                </div>
+              ))}
+            </div>
+            <hr className="border-slate-50 mt-6" />
           </div>
         ))}
       </main>
-      <div className="fixed bottom-0 left-0 w-full bg-white/80 backdrop-blur-md p-4 z-20">
-        <button onClick={() => isLastCategory ? onFinish(answers) : (() => { setCurrentCatIndex(c => c+1); window.scrollTo(0,0); })()} disabled={!isCategoryComplete} className={`max-w-xl mx-auto w-full py-4 rounded-2xl font-bold text-lg flex items-center justify-center gap-2 transition-all ${isCategoryComplete ? 'bg-slate-900 text-white shadow-xl hover:-translate-y-1' : 'bg-slate-100 text-slate-300 cursor-not-allowed'}`}>
-          {isLastCategory ? 'ประมวลผลความหิว' : 'ถัดไป'} <ArrowRight size={20} />
-        </button>
+      <div className="fixed bottom-0 left-0 w-full bg-white/90 backdrop-blur-md border-t border-slate-100 p-4 z-30">
+        <div className="max-w-xl mx-auto"><button onClick={handleSubmit} className="w-full py-4 bg-slate-900 text-white rounded-2xl font-bold text-lg shadow-xl hover:bg-slate-800 transition-all flex items-center justify-center gap-2 transform active:scale-95">เสร็จแล้ว / สุ่มเลย <ArrowRight size={20} /></button></div>
       </div>
     </div>
   );
 };
 
-// --- Sub-Component: Food Randomizer ---
+// --- Sub-Component: Main Randomizer ---
 const FoodRandomizerApp = ({ userProfile, onRetakeQuiz, apiKeys, onUpdateKeys }) => {
   const [options, setOptions] = useState([]);
-  const [newOption, setNewOption] = useState("");
-  const [result, setResult] = useState(null);
-  const [recommendedMenu, setRecommendedMenu] = useState(null);
-  const [isSpinning, setIsSpinning] = useState(false);
-  const [displayedOption, setDisplayedOption] = useState("วันนี้กินไรดี?");
+  const [result, setResult] = useState({ food: null, drink: null, dessert: null, shop: null });
+  const [spinningState, setSpinningState] = useState({ food: false, drink: false, dessert: false, shop: false });
+  const [analysis, setAnalysis] = useState(null);
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  
+  const [allergy, setAllergy] = useState("");
   const [exclusions, setExclusions] = useState([]);
-  const [exclusionInput, setExclusionInput] = useState("");
+  const [favorites, setFavorites] = useState([]);
+  const [selectedTypes, setSelectedTypes] = useState({ food: true, drink: true, dessert: true });
+  
   const [isLocating, setIsLocating] = useState(false);
   const [showKeyModal, setShowKeyModal] = useState(false);
+  const [showFavModal, setShowFavModal] = useState(false);
   const [showFilters, setShowFilters] = useState(false);
 
-  // Profile Analysis
+  const priceRange = userProfile.priceRange || { min: 50, max: 300 };
+  const searchRadius = useMemo(() => {
+    return (userProfile?.distance || 1) * 1000;
+  }, [userProfile?.distance]);
+
   const getProfileBadge = () => {
     if (!userProfile) return null;
-    if (userProfile.q_budget === 3) return { text: "สายเปย์", icon: <Banknote size={12}/>, color: "bg-purple-100 text-purple-700" };
-    if (userProfile.q_spicy >= 4) return { text: "สายแซ่บ", icon: <Flame size={12}/>, color: "bg-red-100 text-red-700" };
-    if (userProfile.q_veg_ratio >= 4) return { text: "สายผัก", icon: <Leaf size={12}/>, color: "bg-green-100 text-green-700" };
-    return { text: "สายกินเก่ง", icon: <ChefHat size={12}/>, color: "bg-orange-100 text-orange-700" };
+    if (priceRange.max >= 500) return { text: "สายเปย์", color: "bg-purple-100 text-purple-700" };
+    if (userProfile.q_spicy >= 4) return { text: "สายแซ่บ", color: "bg-red-100 text-red-700" };
+    return { text: "สายกิน", color: "bg-orange-100 text-orange-700" };
   };
   const profileBadge = getProfileBadge();
 
-  // Mock Data (Fallback)
-  const mockNearbyPlaces = [
-    "ร้านป้าเล็กตามสั่ง (100 ม.)", "ก๋วยเตี๋ยวต้มยำปากซอย (250 ม.)", "ข้าวมันไก่เจ๊อ้วน (300 ม.)",
-    "ส้มตำหน้าเซเว่น (50 ม.)", "ร้านอาหารญี่ปุ่นซอย 8 (800 ม.)", "พิซซ่าเตาถ่าน (1.5 กม.)", 
-    "หมูปิ้งนมสด (20 ม.)", "สุกี้ตี๋น้อย (2 กม.)", "ไก่ย่างวิเชียรบุรี (1 กม.)"
-  ];
-
-  // Logic: Get Menu (Local Fallback + AI Entry Point)
-  const getMenuForShop = async (shopName, currentExclusions = [], useAI = false) => {
-    // 1. Try AI if enabled
-    if (useAI && apiKeys.gemini) {
-      const aiMenu = await callGeminiAI(apiKeys.gemini, shopName, userProfile, currentExclusions);
-      if (aiMenu) return aiMenu;
-    }
-
-    // 2. Local Fallback logic
-    const menus = {
-      noodle: ["เส้นเล็กต้มยำ", "หมี่ขาวน้ำใส", "เล็กแห้งไม่งอก", "บะหมี่เกี๊ยวหมูแดง", "เส้นใหญ่เย็นตาโฟ", "มาม่าต้มยำ"],
-      somtum: ["ตำไทยไข่เค็ม", "ตำปูปลาร้า", "ลาบหมู", "น้ำตกหมู", "ไก่ย่างข้าวเหนียว", "ซุปหน่อไม้"],
-      rice: ["ข้าวกะเพราหมูสับไข่ดาว", "ข้าวผัดหมู", "ข้าวหมูกระเทียม", "ข้าวคะน้าหมูกรอบ", "พริกแกงไก่ราดข้าว"],
-      japanese: ["ข้าวหน้าเนื้อ", "ราเมง", "ซูชิเซ็ต", "ข้าวแกงกะหรี่", "แซลมอนดอง"],
-      fastfood: ["เบอร์เกอร์เนื้อ", "ไก่ทอด", "เฟรนช์ฟรายส์", "นักเก็ต", "พิซซ่าหน้าฮาวายเอี้ยน"],
-      shabu: ["ชุดหมูสไลด์", "ชุดเนื้อวากิว", "ชุดรวมมิตรทะเล", "ชุดผักรวม"],
-      general: ["ข้าวไข่เจียว", "สุกี้แห้ง/น้ำ", "มาม่าผัดขี้เมา", "ราดหน้าหมูหมัก", "ผัดซีอิ๊ว"]
-    };
-    
-    let targetList = menus.general;
-    if (shopName.includes("ก๋วยเตี๋ยว") || shopName.includes("บะหมี่") || shopName.includes("ก๋วยจั๊บ")) targetList = menus.noodle;
-    else if (shopName.includes("ส้มตำ") || shopName.includes("ลาบ") || shopName.includes("ไก่ย่าง")) targetList = menus.somtum;
-    else if (shopName.includes("ญี่ปุ่น") || shopName.includes("ซูชิ")) targetList = menus.japanese;
-    else if (shopName.includes("ตามสั่ง") || shopName.includes("ข้าว") || shopName.includes("ป้า")) targetList = menus.rice;
-    else if (shopName.includes("พิซซ่า") || shopName.includes("เบอร์เกอร์")) targetList = menus.fastfood;
-    else if (shopName.includes("หมูกระทะ") || shopName.includes("สุกี้") || shopName.includes("ชาบู")) targetList = menus.shabu;
-    
-    const validMenus = targetList.filter(m => !currentExclusions.some(ex => m.includes(ex)));
-    return validMenus.length > 0 ? validMenus[Math.floor(Math.random() * validMenus.length)] : "เมนูพิเศษ (หมดตัวเลือก)";
+  // Helper to fetch images via Unsplash
+  const fetchImage = async (query) => {
+    return await fetchUnsplashImage(query, apiKeys.unsplash);
   };
 
-  const activeOptions = options.filter(opt => !exclusions.some(excludeWord => opt.includes(excludeWord)));
-  const addOption = (e) => { e.preventDefault(); if (newOption.trim()) { setOptions([...options, newOption.trim()]); setNewOption(""); } };
-  const removeOption = (val) => setOptions(options.filter(o => o !== val));
-  const addExclusion = (e) => { e.preventDefault(); if (exclusionInput.trim() && !exclusions.includes(exclusionInput.trim())) { setExclusions([...exclusions, exclusionInput.trim()]); setExclusionInput(""); } };
-  const removeExclusion = (val) => setExclusions(exclusions.filter(e => e !== val));
+  const getMenuForShop = async (shopName, useAI = false, slotToReroll = null) => {
+    // 🔥 Use Rotation logic automatically via helper
+    const aiResponse = await callGeminiAI(apiKeys.gemini, shopName, userProfile, exclusions, allergy, priceRange, selectedTypes, slotToReroll);
+    if (aiResponse) return aiResponse;
+    
+    // Fallback if all keys fail
+    return { food: "AI Error", drink: "AI Error", dessert: "AI Error" };
+  };
 
   const handleFetchNearby = async () => {
     setIsLocating(true); 
-    setDisplayedOption("กำลังสแกนพื้นที่..."); 
-    setResult(null); 
-    setRecommendedMenu(null);
-
-    // --- FIX: ถ้าไม่มี API Key -> ใช้ Mock ทันที (ไม่ต้องรอ GPS) ---
-    if (!apiKeys.googleMaps) {
-      setTimeout(() => {
-        const shuffled = [...mockNearbyPlaces].sort(() => 0.5 - Math.random());
-        const selected = shuffled.slice(0, 5); 
-        setOptions(prev => [...new Set([...prev, ...selected])]);
-        setIsLocating(false); 
-        setDisplayedOption("เจอแหล่งอาหารจำลอง!");
-      }, 1500);
-      return;
-    }
-    // --------------------------------------------------------
-
-    if (!("geolocation" in navigator)) {
-      alert("ไม่รองรับ GPS"); setIsLocating(false); return;
-    }
+    if (!navigator.geolocation) { alert("ไม่รองรับ GPS"); setIsLocating(false); return; }
 
     navigator.geolocation.getCurrentPosition(async (pos) => {
-      const { latitude, longitude } = pos.coords;
-
-      // Try Google Maps API
-      try {
-        await loadGoogleMapsScript(apiKeys.googleMaps);
-        const service = new window.google.maps.places.PlacesService(document.createElement('div'));
-        const request = {
-          location: new window.google.maps.LatLng(latitude, longitude),
-          radius: '1000', // 1km
-          type: ['restaurant', 'food']
-        };
-        
-        service.nearbySearch(request, (results, status) => {
-          if (status === window.google.maps.places.PlacesServiceStatus.OK && results) {
-            const realPlaces = results.map(p => p.name).slice(0, 10); // Take top 10
-            setOptions(prev => { 
-              const uniqueNew = realPlaces.filter(s => !prev.includes(s)); 
-              return [...prev, ...uniqueNew]; 
-            });
-            setDisplayedOption("เจอร้านจริงแล้ว!");
-          } else {
-            setDisplayedOption("ไม่พบร้าน (Google Error)");
-          }
-          setIsLocating(false);
-        });
-      } catch (err) {
-        console.error("Google Maps Error:", err);
-        setIsLocating(false);
-        setDisplayedOption("Error Loading Maps");
-      }
-
-    }, () => { alert("ไม่สามารถระบุตำแหน่ง"); setIsLocating(false); setDisplayedOption("หาไม่เจอ"); });
+        try {
+            const places = await fetchNearbyPlacesOSM(pos.coords.latitude, pos.coords.longitude, searchRadius);
+            if (places.length > 0) {
+                setOptions(places);
+            } else {
+                alert(`ไม่พบร้านอาหารในระยะ ${searchRadius/1000} กม.`);
+                setOptions([]); 
+            }
+        } catch (error) {
+            console.error(error);
+            alert("เกิดข้อผิดพลาดในการดึงข้อมูล");
+        } finally {
+            setIsLocating(false);
+        }
+    }, () => { alert("ไม่สามารถระบุตำแหน่งได้"); setIsLocating(false); });
   };
 
-  const handleRandomize = () => {
-    if (activeOptions.length === 0) return;
-    setIsSpinning(true); setResult(null); setRecommendedMenu(null); setShowFilters(false);
+  const handleRandomizeAll = () => {
+    if (options.length === 0) return;
     
-    let counter = 0; const maxShuffles = 20; const speed = 80;
+    const newSpinning = { shop: true };
+    if (selectedTypes.food) newSpinning.food = true;
+    if (selectedTypes.drink) newSpinning.drink = true;
+    if (selectedTypes.dessert) newSpinning.dessert = true;
     
-    const intervalId = setInterval(async () => {
-      // Spinning Animation
-      const randomShop = activeOptions[Math.floor(Math.random() * activeOptions.length)];
-      // Quick local menu for spinning effect
-      const tempMenu = await getMenuForShop(randomShop, exclusions, false); 
-      setDisplayedOption(tempMenu);
-      
+    setSpinningState(newSpinning);
+    setResult(prev => ({ 
+        ...prev, 
+        shop: null,
+        food: selectedTypes.food ? null : prev.food,
+        drink: selectedTypes.drink ? null : prev.drink,
+        dessert: selectedTypes.dessert ? null : prev.dessert
+    }));
+    setAnalysis(null);
+    
+    let counter = 0;
+    const interval = setInterval(async () => {
+      const tempShop = options[Math.floor(Math.random() * options.length)];
+      setResult(prev => ({ 
+          ...prev, 
+          shop: tempShop, 
+          food: selectedTypes.food ? "กำลังเลือก..." : prev.food, 
+          drink: selectedTypes.drink ? "กำลังเลือก..." : prev.drink, 
+          dessert: selectedTypes.dessert ? "กำลังเลือก..." : prev.dessert 
+      }));
       counter++;
-      if (counter > maxShuffles) {
-        clearInterval(intervalId);
-        
-        // Final Result
-        const finalShop = activeOptions[Math.floor(Math.random() * activeOptions.length)];
-        setResult(finalShop);
-        
-        // Final Menu (Use AI if available)
-        setDisplayedOption(apiKeys.gemini ? "AI กำลังคิด..." : "กำลังเลือก...");
-        const finalMenu = await getMenuForShop(finalShop, exclusions, true); // true = Use AI
-        
-        setRecommendedMenu(finalMenu);
-        setDisplayedOption(finalMenu);
-        setIsSpinning(false);
+      if (counter > 10) {
+        clearInterval(interval);
+        try {
+            const finalShop = options[Math.floor(Math.random() * options.length)];
+            const menuSet = await getMenuForShop(finalShop, true);
+            
+            if (!menuSet) throw new Error("Menu set is invalid");
+
+            const [fImg, dImg, dsImg] = await Promise.all([
+                selectedTypes.food && menuSet.food && menuSet.food !== "N/A" ? fetchImage(menuSet.food) : null,
+                selectedTypes.drink && menuSet.drink && menuSet.drink !== "N/A" ? fetchImage(menuSet.drink) : null,
+                selectedTypes.dessert && menuSet.dessert && menuSet.dessert !== "N/A" ? fetchImage(menuSet.dessert) : null
+            ]);
+
+            setResult(prev => ({ 
+                ...prev,
+                shop: finalShop, 
+                food: selectedTypes.food ? (menuSet.food || "N/A") : prev.food,
+                drink: selectedTypes.drink ? (menuSet.drink || "N/A") : prev.drink,
+                dessert: selectedTypes.dessert ? (menuSet.dessert || "N/A") : prev.dessert,
+                foodImg: selectedTypes.food ? fImg : prev.foodImg, 
+                drinkImg: selectedTypes.drink ? dImg : prev.drinkImg, 
+                dessertImg: selectedTypes.dessert ? dsImg : prev.dessertImg 
+            }));
+        } catch (e) {
+            console.error("Randomize Error:", e);
+            setResult(prev => ({ ...prev, shop: "เกิดข้อผิดพลาด", food: "ลองใหม่", drink: "ลองใหม่", dessert: "ลองใหม่" }));
+        } finally {
+            setSpinningState({ food: false, drink: false, dessert: false, shop: false });
+        }
       }
-    }, speed);
+    }, 100);
+  };
+
+  const handleRandomizeSlot = async (slotType) => {
+    if (!result.shop || options.length === 0) return handleRandomizeAll();
+    
+    setSpinningState(prev => ({ ...prev, [slotType]: true }));
+    setResult(prev => ({ ...prev, [slotType]: "กำลังโหลด..." }));
+    setAnalysis(null);
+
+    setTimeout(async () => {
+      try {
+          const newItem = await getMenuForShop(result.shop, true, slotType); 
+          const itemName = newItem && newItem[slotType] ? newItem[slotType] : "N/A";
+          const newImg = await fetchImage(itemName);
+          setResult(prev => ({ ...prev, [slotType]: itemName, [`${slotType}Img`]: newImg }));
+      } catch (e) {
+          console.error("Slot Error:", e);
+          setResult(prev => ({ ...prev, [slotType]: "Error" }));
+      } finally {
+          setSpinningState(prev => ({ ...prev, [slotType]: false }));
+      }
+    }, 800);
+  };
+
+  const handleAnalyze = async () => {
+    if (!result.food || !apiKeys.gemini && GEMINI_KEYS_POOL.length === 0) return;
+    setIsAnalyzing(true);
+    const data = await callGeminiAnalysis(apiKeys.gemini, result);
+    setAnalysis(data);
+    setIsAnalyzing(false);
+  };
+
+  const toggleFavorite = (type, name, img) => {
+    if (!name || name.includes("Key") || name.includes("ระบบ")) return;
+    if (favorites.some(f => f.name === name)) {
+      setFavorites(favorites.filter(f => f.name !== name));
+    } else {
+      setFavorites([...favorites, { id: Date.now(), type, name, image: img, shop: result.shop, rating: 0, comment: '' }]);
+    }
+  };
+
+  const updateReview = (id, rating, comment) => {
+    setFavorites(favorites.map(f => f.id === id ? { ...f, rating, comment } : f));
+  };
+
+  const banItem = (item) => {
+    if(!item || item.includes("Key") || item.includes("ระบบ")) return;
+    if(window.confirm(`ตัด "${item}" ออกจากรายการ?`)) { setExclusions([...exclusions, item]); }
+  };
+
+  const toggleType = (type) => setSelectedTypes(prev => ({ ...prev, [type]: !prev[type] }));
+
+  const ResultCard = ({ type, title, icon: Icon, item, img, color, isSelected, onToggle }) => {
+    const isFav = favorites.some(f => f.name === item);
+    const isSlotSpinning = spinningState[type];
+    const hasItem = item && item !== "กำลังเลือก..." && item !== "กำลังโหลด..." && !isSlotSpinning && !String(item).includes("Key");
+    const isMissing = item === "N/A" || item === null || item === "undefined"; 
+
+    if (!isSelected) {
+        return (
+            <div 
+                onClick={onToggle}
+                className="bg-slate-50 rounded-2xl p-4 border-2 border-dashed border-slate-200 flex flex-col items-center justify-center min-h-[160px] cursor-pointer hover:bg-slate-100 transition-colors opacity-50"
+            >
+                <div className="p-3 bg-slate-200 rounded-full text-slate-400 mb-2"><Icon size={24}/></div>
+                <span className="text-sm font-bold text-slate-400">ไม่ได้เลือก {title}</span>
+                <span className="text-[10px] text-slate-400">(แตะเพื่อเปิด)</span>
+            </div>
+        );
+    }
+
+    return (
+      <div className={`bg-white rounded-2xl shadow-md border-l-4 ${color} overflow-hidden flex flex-col h-full`}>
+        {/* Image Section at Top */}
+        <div className="relative h-32 w-full bg-slate-100 flex-shrink-0">
+            {hasItem && img ? (
+                <>
+                    <img 
+                        src={img} 
+                        className="w-full h-full object-cover transition-transform duration-700 hover:scale-110" 
+                        alt={String(item)} 
+                        loading="lazy" 
+                    />
+                    <div className="absolute bottom-1 right-2 z-10 text-[8px] text-white/70 bg-black/30 px-1 rounded flex items-center gap-1"><Camera size={8}/> Unsplash</div>
+                </>
+            ) : (
+                <div className="w-full h-full flex flex-col items-center justify-center text-slate-300">
+                    {isMissing ? <Ban size={32}/> : <Icon size={40}/>}
+                </div>
+            )}
+            
+            {/* Spinning Overlay */}
+            {isSlotSpinning && (
+                <div className="absolute inset-0 bg-slate-100 flex items-center justify-center z-20">
+                    <RefreshCw className="animate-spin text-slate-400" size={24}/>
+                </div>
+            )}
+        </div>
+
+        {/* Content Section */}
+        <div className="p-4 flex flex-col flex-1">
+            <div className="flex justify-between items-start mb-2">
+                <button onClick={onToggle} className="text-xs font-bold uppercase tracking-wider flex items-center gap-2 text-slate-500 hover:text-red-500">
+                    <CheckSquare size={14} className="text-green-500"/> {title}
+                </button>
+                
+                {hasItem && !isMissing && (
+                    <div className="flex gap-1">
+                        <button onClick={() => handleRandomizeSlot(type)} className="p-1.5 bg-slate-50 rounded-full text-slate-500 hover:bg-blue-50 hover:text-blue-500 transition-colors" title="สุ่มใหม่"><RefreshCw size={14}/></button>
+                        <button onClick={() => banItem(item)} className="p-1.5 bg-slate-50 rounded-full text-slate-500 hover:bg-red-50 hover:text-red-500 transition-colors" title="ตัดออก"><Ban size={14}/></button>
+                        <button onClick={() => toggleFavorite(type, item, img)} className={`p-1.5 rounded-full transition-colors shadow-sm ${isFav ? 'bg-red-50 text-red-500' : 'bg-slate-50 text-slate-500 hover:text-red-400'}`}><Heart size={14} fill={isFav ? "currentColor" : "none"}/></button>
+                    </div>
+                )}
+            </div>
+
+            <div className={`font-black text-lg md:text-xl leading-tight text-slate-800 ${isMissing ? 'text-slate-400 italic' : ''}`}>
+                {isMissing ? "ไม่มีเมนู" : (item || "รอการสุ่ม...")}
+            </div>
+        </div>
+      </div>
+    );
   };
 
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-800 font-sans pb-20">
-      <ApiKeyModal 
-        isOpen={showKeyModal} 
-        onClose={() => setShowKeyModal(false)} 
-        onSave={onUpdateKeys}
-        existingKeys={apiKeys}
-      />
-      
-      <header className="bg-white border-b border-slate-200 sticky top-0 z-20 shadow-sm">
-        <div className="max-w-3xl mx-auto px-4 py-3 flex items-center justify-between">
-          <div className="flex items-center gap-2 text-orange-600">
-            <ChefHat size={28} strokeWidth={2.5} />
-            <div>
-              <h1 className="text-lg md:text-xl font-bold tracking-tight text-slate-900 leading-none">กินไรดี</h1>
-              <span className="text-[10px] text-orange-500 font-semibold tracking-wider">KIN RAI DEE</span>
-            </div>
-          </div>
-          
-          <div className="flex items-center gap-2">
-            <button 
-               onClick={onRetakeQuiz}
-               className={`hidden md:flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold border ${profileBadge.color} border-transparent hover:border-current transition-all`}
-            >
-               {profileBadge.icon} {profileBadge.text}
-            </button>
-            <button onClick={() => setShowKeyModal(true)} className={`p-2 rounded-full ${apiKeys.googleMaps || apiKeys.gemini ? 'bg-blue-100 text-blue-600' : 'bg-slate-100 text-slate-400'}`}>
-              <Key size={20} />
-            </button>
-            <button onClick={() => setShowFilters(!showFilters)} className={`p-2 rounded-full relative ${showFilters || exclusions.length > 0 ? 'bg-orange-100 text-orange-600' : 'bg-slate-100 text-slate-500'}`}>
-              <Settings size={20} />
-              {exclusions.length > 0 && <span className="absolute top-0 right-0 w-2.5 h-2.5 bg-red-500 rounded-full border-2 border-white"></span>}
-            </button>
-          </div>
-        </div>
-        
-        <div className="md:hidden px-4 pb-2">
-           <button onClick={onRetakeQuiz} className={`w-full flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold ${profileBadge.color}`}>
-               {profileBadge.icon} คุณคือ: {profileBadge.text} (แตะเพื่อทำแบบทดสอบใหม่)
-            </button>
-        </div>
+    <div className="min-h-screen bg-slate-50 pb-20 font-sans text-slate-800">
+      <ApiKeyModal isOpen={showKeyModal} onClose={() => setShowKeyModal(false)} onSave={onUpdateKeys} existingKeys={apiKeys} />
+      <FavoritesModal isOpen={showFavModal} onClose={() => setShowFavModal(false)} favorites={favorites} onRemove={(id) => setFavorites(favorites.filter(f=>f.id!==id))} onUpdateReview={updateReview} />
 
+      <header className="bg-white/80 backdrop-blur-md border-b sticky top-0 z-30 px-4 py-3 shadow-sm">
+        <div className="max-w-3xl mx-auto flex items-center justify-between">
+          <div className="flex items-center gap-2 text-orange-600"><ChefHat size={28} strokeWidth={2.5}/><div><h1 className="text-xl font-black text-slate-900 leading-none">กินไรดี</h1><span className="text-[10px] text-orange-500 font-semibold tracking-wider">REAL & AI</span></div></div>
+          <div className="flex items-center gap-2">
+            <button onClick={() => setShowKeyModal(true)} className={`p-2 rounded-full ${apiKeys.gemini ? 'bg-blue-100 text-blue-600' : 'bg-red-100 text-red-500 animate-pulse'}`}><Key size={18}/></button>
+            <button onClick={() => setShowFavModal(true)} className="p-2 bg-red-50 text-red-500 rounded-full hover:bg-red-100 relative"><Heart size={18} fill={favorites.length > 0 ? "currentColor" : "none"}/>{favorites.length > 0 && <span className="absolute top-0 right-0 w-2 h-2 bg-red-600 rounded-full animate-ping"/>}</button>
+            <button onClick={() => setShowFilters(!showFilters)} className={`p-2 rounded-full relative ${showFilters || allergy || exclusions.length > 0 ? 'bg-orange-100 text-orange-600' : 'bg-slate-100 text-slate-500'}`}><Settings size={20} /></button>
+          </div>
+        </div>
         {showFilters && (
           <div className="bg-orange-50/50 border-b border-orange-100 p-4 animate-in slide-in-from-top-2">
-             <div className="max-w-3xl mx-auto">
-                <h3 className="text-sm font-bold text-orange-800 mb-2 flex items-center gap-2"><AlertCircle size={14}/> Filter (ไม่กินอะไรบอกได้)</h3>
-                <form onSubmit={addExclusion} className="flex gap-2 mb-2">
-                  <input type="text" value={exclusionInput} onChange={(e)=>setExclusionInput(e.target.value)} placeholder="เช่น เผ็ด, เครื่องใน..." className="flex-1 px-3 py-2 rounded-lg border border-orange-200 text-sm outline-none focus:ring-2 focus:ring-orange-400" />
-                  <button type="submit" className="px-4 py-2 bg-orange-200 text-orange-800 rounded-lg text-sm font-bold">แบน</button>
-                </form>
-                <div className="flex flex-wrap gap-2">{exclusions.map((ex, idx) => (<span key={idx} className="inline-flex items-center gap-1 px-2 py-1 bg-red-100 text-red-700 rounded text-xs font-medium">ไม่เอา {ex} <button onClick={()=>removeExclusion(ex)}><X size={12}/></button></span>))}</div>
+             <div className="max-w-3xl mx-auto space-y-3">
+                <div className="flex gap-2">
+                  <div className="bg-white p-3 rounded-xl border border-orange-200 flex-1">
+                     <div className="text-[10px] font-bold text-slate-400 uppercase">งบประมาณ</div>
+                     <div className="text-sm font-bold text-slate-700">{priceRange.min}-{priceRange.max} บ.</div>
+                  </div>
+                  <div className="bg-white p-3 rounded-xl border border-indigo-200 flex-1">
+                     <div className="text-[10px] font-bold text-slate-400 uppercase">รัศมี</div>
+                     <div className="text-sm font-bold text-slate-700">{userProfile.distance || 1} กม.</div>
+                  </div>
+                  <button onClick={onRetakeQuiz} className="bg-white p-3 rounded-xl border border-slate-200 text-blue-500"><Edit3 size={16}/></button>
+                </div>
+                <div><h3 className="text-xs font-bold text-red-600 mb-1">แพ้อาหาร (Allergy)</h3><input value={allergy} onChange={(e)=>setAllergy(e.target.value)} placeholder="เช่น กุ้ง, ถั่วลิสง..." className="w-full px-3 py-2 rounded-lg border border-red-200 text-sm focus:ring-2 focus:ring-red-400 outline-none bg-white"/></div>
+                <div>
+                  <h3 className="text-xs font-bold text-orange-800 mb-1">Ban List</h3>
+                  <div className="flex flex-wrap gap-2">{exclusions.map((ex, idx) => (<span key={idx} className="inline-flex items-center gap-1 px-2 py-1 bg-white border border-slate-200 text-slate-600 rounded text-xs font-medium decoration-slice line-through">{ex} <button onClick={()=>setExclusions(exclusions.filter(e=>e!==ex))}><X size={10} className="hover:text-red-500"/></button></span>))}</div>
+                </div>
              </div>
           </div>
         )}
       </header>
 
-      <main className="max-w-3xl mx-auto px-4 py-6">
-        <div className="bg-white rounded-3xl shadow-xl border border-slate-100 p-6 md:p-8 mb-6 text-center relative overflow-hidden">
-           <div className="absolute top-0 left-0 w-full h-2 bg-gradient-to-r from-orange-400 via-red-500 to-orange-400"></div>
-           <div className="mb-4 flex justify-center text-orange-500 opacity-20">{activeOptions.length === 0 ? <MapPin size={80} /> : <Utensils size={80} />}</div>
-           
-           <div className="relative z-10 -mt-16">
-             <h2 className="text-sm uppercase tracking-widest text-slate-400 font-bold mb-4">{result ? "มื้อนี้กิน..." : "หิวหรือยัง?"}</h2>
-             <div className={`min-h-[8rem] flex flex-col items-center justify-center mb-6 ${isSpinning ? 'blur-sm' : ''}`}>
-               {result && recommendedMenu && !isSpinning ? (
-                 <div className="animate-in zoom-in duration-300 w-full">
-                   <div className="text-4xl md:text-5xl font-black text-slate-800 mb-4 break-words">{recommendedMenu}</div>
-                   <div className="inline-flex items-center gap-2 px-4 py-2 bg-slate-50 rounded-lg text-slate-500 text-sm mb-6 border border-slate-100">
-                     <MapPin size={14}/> พิกัด: <span className="font-bold text-orange-600">{result}</span>
-                   </div>
-                   {apiKeys.gemini && <div className="text-[10px] text-blue-500 font-bold mb-4 flex items-center gap-1"><Sparkles size={10}/> แนะนำโดย AI (Gemini)</div>}
-                   <div className="w-full max-w-md mx-auto rounded-xl overflow-hidden shadow-lg border-4 border-white bg-black aspect-video relative group">
-                     <div className="absolute top-2 left-2 z-10 bg-red-600 text-white text-[10px] font-bold px-2 py-0.5 rounded flex items-center gap-1"><Youtube size={12}/> ยั่วน้ำลาย</div>
-                     <iframe className="w-full h-full" src={`https://www.youtube.com/embed?listType=search&list=${encodeURIComponent("เมนู " + recommendedMenu + " asmr street food")}&autoplay=1&mute=1&controls=1&loop=1`} title="YouTube" allowFullScreen></iframe>
-                   </div>
-                 </div>
-               ) : (
-                 <div className="text-3xl md:text-5xl font-black text-slate-700">{displayedOption}</div>
-               )}
-             </div>
+      <main className="max-w-3xl mx-auto px-4 pt-6 space-y-6">
+        <div className="relative">
+          <div className="text-center mb-6">
+            <h2 className="text-sm font-bold text-slate-400 uppercase tracking-widest mb-1">ร้านอาหารที่เลือก</h2>
+            <div className={`text-2xl font-black text-slate-800 flex justify-center items-center gap-2 ${spinningState.shop ? 'animate-pulse opacity-50' : ''}`}><MapPin className="text-orange-500"/> {result.shop || "รอสุ่มร้าน..."}</div>
+          </div>
 
-             {activeOptions.length === 0 ? (
-               <button onClick={handleFetchNearby} disabled={isLocating} className="bg-blue-600 text-white px-8 py-4 rounded-full font-bold shadow-lg hover:bg-blue-700 flex items-center justify-center gap-2 mx-auto w-full md:w-auto">
-                 {isLocating ? <RefreshCw className="animate-spin"/> : <MapPin className="animate-bounce"/>} {isLocating ? "กำลังสแกน..." : "ค้นหาร้านใกล้ฉัน (GPS)"}
-               </button>
-             ) : (
-               <div className="flex flex-col items-center gap-3">
-                 <button onClick={handleRandomize} disabled={isSpinning} className={`px-10 py-5 rounded-full font-bold text-xl text-white shadow-xl flex items-center gap-3 transition-all transform active:scale-95 ${isSpinning ? 'bg-slate-400' : 'bg-gradient-to-r from-orange-500 to-red-600 hover:shadow-orange-500/40'}`}>
-                   {isSpinning ? <RefreshCw className="animate-spin"/> : <Dices/>} {isSpinning ? "กำลังนึก..." : "สุ่มเมนูเลย!"}
-                 </button>
-                 {!isSpinning && <button onClick={handleFetchNearby} className="text-xs text-slate-400 hover:text-blue-500 flex items-center gap-1 mt-2"><RefreshCw size={12}/> รีเซ็ต/หาใหม่</button>}
-               </div>
-             )}
-           </div>
+          <div className="grid md:grid-cols-3 gap-4">
+            <ResultCard type="food" title="อาหารจานหลัก" icon={Utensils} item={result.food} img={result.foodImg} color="border-orange-500" isSelected={selectedTypes.food} onToggle={() => toggleType('food')} />
+            <ResultCard type="drink" title="เครื่องดื่ม" icon={Coffee} item={result.drink} img={result.drinkImg} color="border-blue-500" isSelected={selectedTypes.drink} onToggle={() => toggleType('drink')} />
+            <ResultCard type="dessert" title="ของหวาน" icon={IceCream} item={result.dessert} img={result.dessertImg} color="border-pink-500" isSelected={selectedTypes.dessert} onToggle={() => toggleType('dessert')} />
+          </div>
+
+          {analysis && (
+            <div className="mt-6 bg-white rounded-2xl p-6 shadow-lg border border-indigo-100 animate-in zoom-in-95">
+              <div className="flex items-start gap-4">
+                <div className="p-3 bg-indigo-100 text-indigo-600 rounded-full"><Sparkles size={24}/></div>
+                <div className="flex-1">
+                  <h3 className="text-lg font-bold text-slate-800 mb-2">บทวิเคราะห์จาก AI นักชิม</h3>
+                  <p className="text-slate-600 italic mb-4">"{analysis.comment}"</p>
+                  <div className="flex flex-wrap gap-4">
+                    <div className="bg-slate-50 px-3 py-2 rounded-lg border border-slate-100">
+                      <div className="text-xs text-slate-400 font-bold uppercase">พลังงานรวม</div>
+                      <div className="text-lg font-black text-slate-800">{analysis.calories} <span className="text-xs font-normal">kcal</span></div>
+                    </div>
+                    <div className="bg-green-50 px-3 py-2 rounded-lg border border-green-100">
+                      <div className="text-xs text-green-600 font-bold uppercase">คะแนนสุขภาพ</div>
+                      <div className="text-lg font-black text-green-700">{analysis.score}/10</div>
+                    </div>
+                  </div>
+                  <div className="mt-3 text-sm text-slate-500 bg-slate-50 p-2 rounded-lg border border-slate-100 flex gap-2"><Info size={16} className="text-blue-400 flex-shrink-0 mt-0.5"/> {analysis.health_tip}</div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          <div className="mt-8 flex flex-col items-center gap-4">
+            {options.length === 0 ? (
+              <button onClick={handleFetchNearby} disabled={isLocating} className="w-full md:w-auto px-10 py-4 bg-blue-600 text-white rounded-full font-bold shadow-xl shadow-blue-500/30 flex items-center justify-center gap-3 hover:scale-105 transition-transform">{isLocating ? <RefreshCw className="animate-spin"/> : <MapPin className="animate-bounce"/>} ค้นหาร้านจริงรอบตัว (OSM)</button>
+            ) : (
+              <div className="flex flex-col gap-3 w-full items-center">
+                <button onClick={handleRandomizeAll} disabled={spinningState.food || spinningState.shop} className={`w-full md:w-auto px-12 py-5 rounded-full font-black text-xl shadow-xl flex items-center justify-center gap-3 transition-all transform active:scale-95 ${spinningState.shop ? 'bg-slate-400 text-white cursor-not-allowed' : 'bg-gradient-to-r from-orange-500 to-red-600 text-white shadow-orange-500/40'}`}>{spinningState.shop ? <RefreshCw className="animate-spin"/> : <Dices/>} {spinningState.shop ? "กำลังจัดเซ็ต..." : "สุ่มครบเซ็ต!"}</button>
+                {/* Fixed condition: Only show Analyze button if user selected food and we have a food result */}
+                {apiKeys.gemini && result.food && selectedTypes.food && !String(result.food).includes("Key") && !spinningState.shop && !analysis && (
+                  <button onClick={handleAnalyze} disabled={isAnalyzing} className="text-sm font-bold text-indigo-600 bg-indigo-50 px-4 py-2 rounded-full hover:bg-indigo-100 flex items-center gap-2 transition-colors">
+                    {isAnalyzing ? <RefreshCw className="animate-spin" size={14}/> : <Activity size={14}/>} {isAnalyzing ? "กำลังวิเคราะห์..." : "วิเคราะห์โภชนาการ (AI)"}
+                  </button>
+                )}
+                {!spinningState.shop && <button onClick={handleFetchNearby} className="text-xs text-slate-400 font-bold flex items-center gap-1 hover:text-blue-500 transition-colors"><RefreshCw size={12}/> รีเซ็ตพิกัด / หาร้านใหม่</button>}
+              </div>
+            )}
+          </div>
         </div>
 
-        <div className="bg-white p-4 rounded-xl shadow-sm border border-slate-100">
-          <div className="flex justify-between items-center mb-4">
-             <h3 className="font-bold text-slate-700 text-sm">แหล่งอาหาร ({activeOptions.length})</h3>
-             <div className="flex gap-2"><button onClick={()=>setOptions([])} className="text-[10px] text-red-500 hover:underline">ล้างค่า</button></div>
-          </div>
-          <div className="flex gap-2 mb-4">
-             <input value={newOption} onChange={(e)=>setNewOption(e.target.value)} placeholder="เพิ่มชื่อร้านเอง..." className="flex-1 bg-slate-50 px-3 py-2 rounded-lg text-sm outline-none focus:ring-1 focus:ring-orange-300"/>
-             <button onClick={addOption} disabled={!newOption.trim()} className="bg-slate-200 hover:bg-slate-300 px-3 py-2 rounded-lg"><Plus size={16}/></button>
-          </div>
-          {options.length > 0 ? (
-             <div className="flex flex-wrap gap-2 max-h-[120px] overflow-y-auto">
-               {options.map((opt, i) => {
-                 const isActive = activeOptions.includes(opt);
-                 return (
-                   <span key={i} className={`inline-flex items-center gap-1 px-2 py-1 rounded text-xs border ${isActive ? 'bg-slate-50 border-slate-200 text-slate-600' : 'bg-slate-50 border-transparent text-slate-300 line-through'}`}>
-                     {opt} <button onClick={()=>removeOption(opt)} className="hover:text-red-500"><Trash2 size={10}/></button>
-                   </span>
-                 )
-               })}
-             </div>
-          ) : (
-            <div className="text-center py-6 text-slate-300 text-xs">ยังไม่มีร้านค้าในระบบ</div>
-          )}
+        <div className="bg-white rounded-2xl p-5 border border-slate-100 shadow-sm mt-8">
+          <div className="flex justify-between items-center mb-3"><h3 className="font-bold text-slate-700 text-sm">ร้านอาหารจริงในระยะ {userProfile.distance || 1} กม. ({options.length})</h3></div>
+          <div className="flex flex-wrap gap-2 max-h-[150px] overflow-y-auto">{options.length === 0 ? <span className="text-xs text-slate-400">ยังไม่ได้ค้นหา...</span> : options.map((opt, i) => (<span key={i} className="px-2 py-1 bg-slate-50 border border-slate-100 text-slate-600 rounded text-xs font-medium">{opt}</span>))}</div>
         </div>
       </main>
     </div>
   );
 };
 
-// --- Main Container (Orchestrator) ---
+// --- App Orchestrator ---
 const App = () => {
-  const [appState, setAppState] = useState('welcome'); 
+  const [appState, setAppState] = useState('welcome');
   const [userProfile, setUserProfile] = useState(null);
-  
-  // 🟢 แก้ตรงนี้: ใส่ Key ของคุณลงไปในเครื่องหมายคำพูดได้เลยครับ
-  const [apiKeys, setApiKeys] = useState({ 
-    googleMaps: '', 
-    gemini: '' 
-  });
+  const [apiKeys, setApiKeys] = useState({ gemini: '', unsplash: '' });
 
-  const handleStart = () => setAppState('quiz');
-  const handleQuizFinish = (answers) => { setUserProfile(answers); setAppState('app'); };
-  const handleRetake = () => setAppState('quiz');
-  const handleUpdateKeys = (newKeys) => setApiKeys(newKeys);
-
-  if (appState === 'welcome') {
-    return (
-      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
-        <div className="max-w-md w-full bg-white rounded-3xl p-8 shadow-xl text-center border border-slate-100">
-          <div className="inline-flex p-4 bg-orange-100 text-orange-600 rounded-full mb-6"><ChefHat size={48} /></div>
-          <h1 className="text-3xl font-black text-slate-800 mb-2">กินไรดี?</h1>
-          <p className="text-slate-500 mb-8">ก่อนจะสุ่ม ขอสำรวจความหิวและรสนิยมของคุณหน่อย เพื่อให้เราเลือกเมนูได้ถูกใจที่สุด</p>
-          <button onClick={handleStart} className="w-full py-4 bg-gradient-to-r from-orange-500 to-red-600 text-white rounded-xl font-bold text-lg shadow-lg shadow-orange-500/30 hover:scale-105 transition-transform flex items-center justify-center gap-2">เริ่มทำแบบทดสอบ <ArrowRight /></button>
-        </div>
+  if (appState === 'welcome') return (
+    <div className="min-h-screen bg-slate-50 flex items-center justify-center p-6">
+      <div className="max-w-sm w-full text-center">
+        <div className="inline-flex p-6 bg-orange-100 text-orange-600 rounded-[2.5rem] mb-8 shadow-inner"><ChefHat size={64} /></div>
+        <h1 className="text-4xl font-black text-slate-900 mb-4">กินไรดี?</h1>
+        <button onClick={() => setAppState('quiz')} className="w-full py-5 bg-slate-900 text-white rounded-[1.5rem] font-bold text-lg shadow-2xl hover:scale-105 transition-transform flex items-center justify-center gap-2">เริ่มสแกนความหิว <ArrowRight/></button>
       </div>
-    );
-  }
+    </div>
+  );
 
-  if (appState === 'quiz') return <PreferenceQuiz onFinish={handleQuizFinish} />;
-  return <FoodRandomizerApp userProfile={userProfile} onRetakeQuiz={handleRetake} apiKeys={apiKeys} onUpdateKeys={handleUpdateKeys} />;
+  if (appState === 'quiz') return <PreferenceQuiz onFinish={(ans) => { setUserProfile(ans); setAppState('app'); }} />;
+  return <FoodRandomizerApp userProfile={userProfile} onRetakeQuiz={() => setAppState('quiz')} apiKeys={apiKeys} onUpdateKeys={(k) => setApiKeys(k)} />;
 };
 
 export default App;
