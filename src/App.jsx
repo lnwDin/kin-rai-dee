@@ -3,8 +3,8 @@ import {
   Utensils, Plus, Trash2, RefreshCw, ChefHat, Sparkles, Dices, 
   MapPin, Settings, X, AlertCircle, Youtube, Play, ArrowRight, 
   CheckCircle2, Flame, Leaf, Beef, Wheat, Soup, Clock, Key, Banknote,
-  Coffee, IceCream, Heart, Star, Ban, MessageSquare, Edit3, Activity, Info, Camera, CheckSquare, Square, Image, ImageOff,
-  Check, Loader2
+  Coffee, IceCream, Heart, Star, Ban, MessageSquare, Edit, Activity, Info, Camera, CheckSquare, Square, Image, ImageOff,
+  Check, Loader
 } from 'lucide-react';
 
 // --- Global Config: Gemini Keys Pool ---
@@ -106,7 +106,6 @@ const fetchUnsplashImage = async (query, accessKey) => {
 
 // --- Helper: Call Gemini AI (Selection) ---
 const callGeminiAI = async (apiKey, shopName, userProfile, exclusions, allergy, priceRange, selectedTypes, slotToReroll = null) => {
-  // Fix: Handle 0 value correctly (don't fallback to 3 if value is 0)
   const getScore = (val) => (val !== undefined && val !== null) ? val : 3; 
   const budgetText = `${priceRange.min} - ${priceRange.max} THB`;
 
@@ -320,7 +319,7 @@ const ApiKeyModal = ({ isOpen, onClose, onSave, existingKeys }) => {
         </div>
         <div className="flex gap-2 mt-6">
           <button onClick={onClose} className="flex-1 py-3 text-slate-500 rounded-xl hover:bg-slate-50">ปิด</button>
-          <button onClick={handleSave} disabled={isValidating} className={`flex-1 py-3 text-white rounded-xl font-bold flex items-center justify-center gap-2 ${isValidating ? 'bg-slate-400' : 'bg-slate-900 hover:bg-slate-800'}`}>{isValidating ? <Loader2 size={18} className="animate-spin"/> : <Check size={18}/>} {isValidating ? 'ตรวจสอบ...' : 'บันทึก'}</button>
+          <button onClick={handleSave} disabled={isValidating} className={`flex-1 py-3 text-white rounded-xl font-bold flex items-center justify-center gap-2 ${isValidating ? 'bg-slate-400' : 'bg-slate-900 hover:bg-slate-800'}`}>{isValidating ? <Loader size={18} className="animate-spin"/> : <Check size={18}/>} {isValidating ? 'ตรวจสอบ...' : 'บันทึก'}</button>
         </div>
       </div>
     </div>
@@ -381,7 +380,7 @@ const PreferenceQuiz = ({ onFinish }) => {
     <div className="min-h-screen bg-white pb-28">
       <header className="sticky top-0 bg-white/95 backdrop-blur-md z-20 border-b px-4 py-4 shadow-sm">
         <div className="max-w-xl mx-auto flex justify-between items-center">
-          <h2 className="font-bold text-slate-800 text-lg">สำรวจความหิว (ข้ามได้)</h2>
+          <h2 className="font-bold text-slate-800 text-lg">สำรวจความต้องการ (ข้ามได้)</h2>
           <button onClick={handleSubmit} className="text-xs font-bold text-orange-600 bg-orange-50 px-4 py-2 rounded-full hover:bg-orange-100 transition-colors">ข้ามไปสุ่มเลย</button>
         </div>
       </header>
@@ -567,7 +566,7 @@ const FoodRandomizerApp = ({ userProfile, onRetakeQuiz, apiKeys, onUpdateKeys })
   };
 
   const handleAnalyze = async () => {
-    if (!result.food || !apiKeys.gemini && GEMINI_KEYS_POOL.length === 0) return;
+    if (!result.food && !result.drink && !result.dessert) return;
     setIsAnalyzing(true);
     const data = await callGeminiAnalysis(apiKeys.gemini, result);
     setAnalysis(data);
@@ -672,7 +671,7 @@ const FoodRandomizerApp = ({ userProfile, onRetakeQuiz, apiKeys, onUpdateKeys })
 
       <header className="bg-white/80 backdrop-blur-md border-b sticky top-0 z-30 px-4 py-3 shadow-sm">
         <div className="max-w-3xl mx-auto flex items-center justify-between">
-          <div className="flex items-center gap-2 text-orange-600"><ChefHat size={28} strokeWidth={2.5}/><div><h1 className="text-xl font-black text-slate-900 leading-none">กินไรดี</h1><span className="text-[10px] text-orange-500 font-semibold tracking-wider">REAL & AI</span></div></div>
+          <div className="flex items-center gap-2 text-orange-600"><ChefHat size={28} strokeWidth={2.5}/><div><h1 className="text-xl font-black text-slate-900 leading-none">กินไรดี</h1><span className="text-[10px] text-orange-500 font-semibold tracking-wider">Kin-Rai-Dee</span></div></div>
           <div className="flex items-center gap-2">
             <button onClick={() => setShowKeyModal(true)} className={`p-2 rounded-full ${apiKeys.gemini ? 'bg-blue-100 text-blue-600' : 'bg-red-100 text-red-500 animate-pulse'}`}><Key size={18}/></button>
             <button onClick={() => setShowFavModal(true)} className="p-2 bg-red-50 text-red-500 rounded-full hover:bg-red-100 relative"><Heart size={18} fill={favorites.length > 0 ? "currentColor" : "none"}/>{favorites.length > 0 && <span className="absolute top-0 right-0 w-2 h-2 bg-red-600 rounded-full animate-ping"/>}</button>
@@ -691,7 +690,7 @@ const FoodRandomizerApp = ({ userProfile, onRetakeQuiz, apiKeys, onUpdateKeys })
                      <div className="text-[10px] font-bold text-slate-400 uppercase">รัศมี</div>
                      <div className="text-sm font-bold text-slate-700">{userProfile.distance || 1} กม.</div>
                   </div>
-                  <button onClick={onRetakeQuiz} className="bg-white p-3 rounded-xl border border-slate-200 text-blue-500"><Edit3 size={16}/></button>
+                  <button onClick={onRetakeQuiz} className="bg-white p-3 rounded-xl border border-slate-200 text-blue-500"><Edit size={16}/></button>
                 </div>
                 <div><h3 className="text-xs font-bold text-red-600 mb-1">แพ้อาหาร (Allergy)</h3><input value={allergy} onChange={(e)=>setAllergy(e.target.value)} placeholder="เช่น กุ้ง, ถั่วลิสง..." className="w-full px-3 py-2 rounded-lg border border-red-200 text-sm focus:ring-2 focus:ring-red-400 outline-none bg-white"/></div>
                 <div>
@@ -721,7 +720,7 @@ const FoodRandomizerApp = ({ userProfile, onRetakeQuiz, apiKeys, onUpdateKeys })
               <div className="flex items-start gap-4">
                 <div className="p-3 bg-indigo-100 text-indigo-600 rounded-full"><Sparkles size={24}/></div>
                 <div className="flex-1">
-                  <h3 className="text-lg font-bold text-slate-800 mb-2">บทวิเคราะห์จาก AI นักชิม</h3>
+                  <h3 className="text-lg font-bold text-slate-800 mb-2">บทวิเคราะห์จาก AI</h3>
                   <p className="text-slate-600 italic mb-4">"{analysis.comment}"</p>
                   <div className="flex flex-wrap gap-4">
                     <div className="bg-slate-50 px-3 py-2 rounded-lg border border-slate-100">
@@ -745,8 +744,8 @@ const FoodRandomizerApp = ({ userProfile, onRetakeQuiz, apiKeys, onUpdateKeys })
             ) : (
               <div className="flex flex-col gap-3 w-full items-center">
                 <button onClick={handleRandomizeAll} disabled={spinningState.food || spinningState.shop} className={`w-full md:w-auto px-12 py-5 rounded-full font-black text-xl shadow-xl flex items-center justify-center gap-3 transition-all transform active:scale-95 ${spinningState.shop ? 'bg-slate-400 text-white cursor-not-allowed' : 'bg-gradient-to-r from-orange-500 to-red-600 text-white shadow-orange-500/40'}`}>{spinningState.shop ? <RefreshCw className="animate-spin"/> : <Dices/>} {spinningState.shop ? "กำลังจัดเซ็ต..." : "สุ่มครบเซ็ต!"}</button>
-                {/* Fixed condition: Only show Analyze button if user selected food and we have a food result */}
-                {apiKeys.gemini && result.food && selectedTypes.food && !String(result.food).includes("Key") && !spinningState.shop && !analysis && (
+                {/* Always show Analyze button if we have results (even from pool key) */}
+                {result.food && selectedTypes.food && !String(result.food).includes("Key") && !spinningState.shop && !analysis && (
                   <button onClick={handleAnalyze} disabled={isAnalyzing} className="text-sm font-bold text-indigo-600 bg-indigo-50 px-4 py-2 rounded-full hover:bg-indigo-100 flex items-center gap-2 transition-colors">
                     {isAnalyzing ? <RefreshCw className="animate-spin" size={14}/> : <Activity size={14}/>} {isAnalyzing ? "กำลังวิเคราะห์..." : "วิเคราะห์โภชนาการ (AI)"}
                   </button>
@@ -777,7 +776,7 @@ const App = () => {
       <div className="max-w-sm w-full text-center">
         <div className="inline-flex p-6 bg-orange-100 text-orange-600 rounded-[2.5rem] mb-8 shadow-inner"><ChefHat size={64} /></div>
         <h1 className="text-4xl font-black text-slate-900 mb-4">กินไรดี?</h1>
-        <button onClick={() => setAppState('quiz')} className="w-full py-5 bg-slate-900 text-white rounded-[1.5rem] font-bold text-lg shadow-2xl hover:scale-105 transition-transform flex items-center justify-center gap-2">เริ่มสแกนความหิว <ArrowRight/></button>
+        <button onClick={() => setAppState('quiz')} className="w-full py-5 bg-slate-900 text-white rounded-[1.5rem] font-bold text-lg shadow-2xl hover:scale-105 transition-transform flex items-center justify-center gap-2">เริ่มสำรวจความต้องการ <ArrowRight/></button>
       </div>
     </div>
   );
