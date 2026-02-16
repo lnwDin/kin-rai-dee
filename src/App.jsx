@@ -7,39 +7,25 @@ import {
   Check, Loader
 } from 'lucide-react';
 
-// --- Global Config: Gemini Keys Pool ---
-const GEMINI_KEYS_POOL = [
-  "AIzaSyDU3Of7YjLJU4uEfKNeiy6hpDYSr7kCEwo",
-  "AIzaSyCAc26wgrxEGV4hSaNkzvpKg1dlhQSdJ7k",
-  "AIzaSyCRzGTiaupHvF3I-sqDeqdxv82-UREne_w"
-];
+// --- Helper: Call Gemini via Netlify Functions (Security Patch) ---
+const fetchGeminiWithRotation = async (payload) => {
+  try {
+    // ยิงไปที่ Path ของ Netlify Function แทนการยิงตรงไป Google
+    const response = await fetch('/.netlify/functions/gemini-proxy', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ payload }) // ส่ง payload ไปให้หลังบ้านจัดการต่อ
+    });
 
-// --- Helper: Call Gemini with Key Rotation ---
-const fetchGeminiWithRotation = async (payload, userProvidedKey = '') => {
-  const customKeys = userProvidedKey ? [userProvidedKey] : [];
-  const keysToTry = [...customKeys, ...GEMINI_KEYS_POOL];
+    const data = await response.json();
 
-  for (const key of keysToTry) {
-    try {
-      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${key}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-
-      const data = await response.json();
-
-      if (!response.ok || data.error) {
-        console.warn(`Key ${key.substring(0, 10)}... failed. Switching to next key.`);
-        throw new Error(data.error?.message || "Gemini Error");
-      }
-      return data;
-    } catch (err) {
-      if (key === keysToTry[keysToTry.length - 1]) {
-        console.error("All Gemini keys failed.");
-        throw err;
-      }
+    if (!response.ok || data.error) {
+      throw new Error(data.error || "Gemini Proxy Error");
     }
+    return data;
+  } catch (err) {
+    console.error("API Call failed via Proxy:", err);
+    throw err;
   }
 };
 
@@ -105,7 +91,7 @@ const fetchUnsplashImage = async (query, accessKey) => {
 };
 
 // --- Helper: Call Gemini AI (Selection) ---
-const callGeminiAI = async (apiKey, shopName, userProfile, exclusions, allergy, priceRange, selectedTypes, slotToReroll = null) => {
+const callGeminiAI = async (shopName, userProfile, exclusions, allergy, priceRange, selectedTypes, slotToReroll = null) => {
   const getScore = (val) => (val !== undefined && val !== null) ? val : 3; 
   const budgetText = `${priceRange.min} - ${priceRange.max} THB`;
 
@@ -142,7 +128,7 @@ const callGeminiAI = async (apiKey, shopName, userProfile, exclusions, allergy, 
     const data = await fetchGeminiWithRotation({ 
       contents: [{ parts: [{ text: prompt }] }], 
       generationConfig: { responseMimeType: "application/json" } 
-    }, apiKey);
+    });
     
     let text = data.candidates?.[0]?.content?.parts?.[0]?.text;
     if (!text) return null;
@@ -173,7 +159,7 @@ const callGeminiAI = async (apiKey, shopName, userProfile, exclusions, allergy, 
 };
 
 // --- Helper: Call Gemini AI (Analysis) ---
-const callGeminiAnalysis = async (apiKey, mealSet) => {
+const callGeminiAnalysis = async (mealSet) => {
   const itemsToAnalyze = [];
   if (mealSet.food && mealSet.food !== "N/A") itemsToAnalyze.push(`Main: ${mealSet.food}`);
   if (mealSet.drink && mealSet.drink !== "N/A") itemsToAnalyze.push(`Drink: ${mealSet.drink}`);
@@ -197,7 +183,7 @@ const callGeminiAnalysis = async (apiKey, mealSet) => {
     const data = await fetchGeminiWithRotation({ 
       contents: [{ parts: [{ text: prompt }] }], 
       generationConfig: { responseMimeType: "application/json" } 
-    }, apiKey);
+    });
 
     let text = data.candidates?.[0]?.content?.parts?.[0]?.text;
     if (!text) return null;
@@ -275,25 +261,10 @@ const PriceRangeInput = ({ value, onChange }) => {
 // --- Sub-Component: API Key Modal ---
 const ApiKeyModal = ({ isOpen, onClose, onSave, existingKeys }) => {
   const [keys, setKeys] = useState(existingKeys);
-  const [isValidating, setIsValidating] = useState(false);
-  const [statusMsg, setStatusMsg] = useState(null);
 
   if (!isOpen) return null;
 
   const handleSave = async () => {
-    // Validate custom key if provided
-    if (keys.gemini && !GEMINI_KEYS_POOL.includes(keys.gemini)) {
-       setIsValidating(true); setStatusMsg(null);
-       try {
-         // Test User Key
-         await fetchGeminiWithRotation({ contents: [{ parts: [{ text: "Test" }] }] }, keys.gemini);
-       } catch (err) {
-         setStatusMsg("Key ที่ใส่มาใช้ไม่ได้ครับ (แต่ระบบจะใช้ Key สำรองให้)");
-         // Still save it, maybe quota issue
-       } finally {
-         setIsValidating(false);
-       }
-    }
     onSave(keys);
     onClose();
   };
@@ -304,13 +275,8 @@ const ApiKeyModal = ({ isOpen, onClose, onSave, existingKeys }) => {
         <h2 className="text-xl font-bold mb-4 flex items-center gap-2"><Key size={20} className="text-orange-500"/> ตั้งค่าระบบ</h2>
         <div className="space-y-4">
           <div className="bg-green-50 p-3 rounded-xl border border-green-200">
-             <div className="flex items-center gap-2 text-green-700 font-bold text-sm mb-1"><CheckCircle2 size={16}/> ระบบ AI พร้อมใช้งาน</div>
-             <p className="text-xs text-green-600">มี API Key สำรองในระบบแล้ว 3 ชุด (สลับให้อัตโนมัติ)</p>
-          </div>
-          <div>
-            <label className="text-xs font-bold text-slate-600 ml-1">ใส่ Key ของตัวเอง (ถ้าต้องการ)</label>
-            <input type="password" value={keys.gemini} onChange={(e) => { setKeys({...keys, gemini: e.target.value}); setStatusMsg(null); }} className={`w-full p-3 border rounded-xl outline-none focus:ring-2 transition-all ${statusMsg ? 'border-red-500 ring-1 ring-red-500' : 'focus:ring-orange-500'}`} placeholder="Gemini API Key (Optional)" />
-            {statusMsg && <p className="text-xs text-red-500 mt-1 ml-1 font-bold">{statusMsg}</p>}
+             <div className="flex items-center gap-2 text-green-700 font-bold text-sm mb-1"><CheckCircle2 size={16}/> ระบบ AI ปลอดภัย</div>
+             <p className="text-xs text-green-600">เชื่อมต่อผ่าน Secure Proxy แล้ว ไม่จำเป็นต้องใส่ Gemini Key</p>
           </div>
           <div>
             <label className="text-xs font-bold text-slate-600 ml-1">Unsplash Access Key (สำหรับรูปภาพ)</label>
@@ -319,7 +285,7 @@ const ApiKeyModal = ({ isOpen, onClose, onSave, existingKeys }) => {
         </div>
         <div className="flex gap-2 mt-6">
           <button onClick={onClose} className="flex-1 py-3 text-slate-500 rounded-xl hover:bg-slate-50">ปิด</button>
-          <button onClick={handleSave} disabled={isValidating} className={`flex-1 py-3 text-white rounded-xl font-bold flex items-center justify-center gap-2 ${isValidating ? 'bg-slate-400' : 'bg-slate-900 hover:bg-slate-800'}`}>{isValidating ? <Loader size={18} className="animate-spin"/> : <Check size={18}/>} {isValidating ? 'ตรวจสอบ...' : 'บันทึก'}</button>
+          <button onClick={handleSave} className="flex-1 py-3 bg-slate-900 text-white rounded-xl font-bold flex items-center justify-center gap-2"><Check size={18}/> บันทึก</button>
         </div>
       </div>
     </div>
@@ -367,7 +333,6 @@ const PreferenceQuiz = ({ onFinish }) => {
     const finalAnswers = { ...answers };
     QUIZ_CATEGORIES.forEach(cat => { 
         cat.questions.forEach(q => { 
-            // Fix: Check for undefined specifically, allowing 0
             if (!q.isPriceRange && !q.isDistance && finalAnswers[q.id] === undefined) {
                 finalAnswers[q.id] = 3; 
             }
@@ -436,25 +401,14 @@ const FoodRandomizerApp = ({ userProfile, onRetakeQuiz, apiKeys, onUpdateKeys })
     return (userProfile?.distance || 1) * 1000;
   }, [userProfile?.distance]);
 
-  const getProfileBadge = () => {
-    if (!userProfile) return null;
-    if (priceRange.max >= 500) return { text: "สายเปย์", color: "bg-purple-100 text-purple-700" };
-    if (userProfile.q_spicy >= 4) return { text: "สายแซ่บ", color: "bg-red-100 text-red-700" };
-    return { text: "สายกิน", color: "bg-orange-100 text-orange-700" };
-  };
-  const profileBadge = getProfileBadge();
-
-  // Helper to fetch images via Unsplash
   const fetchImage = async (query) => {
     return await fetchUnsplashImage(query, apiKeys.unsplash);
   };
 
   const getMenuForShop = async (shopName, useAI = false, slotToReroll = null) => {
-    // 🔥 Use Rotation logic automatically via helper
-    const aiResponse = await callGeminiAI(apiKeys.gemini, shopName, userProfile, exclusions, allergy, priceRange, selectedTypes, slotToReroll);
+    // 🔥 เรียกผ่าน Proxy แทนการส่ง Key ตรงๆ
+    const aiResponse = await callGeminiAI(shopName, userProfile, exclusions, allergy, priceRange, selectedTypes, slotToReroll);
     if (aiResponse) return aiResponse;
-    
-    // Fallback if all keys fail
     return { food: "AI Error", drink: "AI Error", dessert: "AI Error" };
   };
 
@@ -568,7 +522,7 @@ const FoodRandomizerApp = ({ userProfile, onRetakeQuiz, apiKeys, onUpdateKeys })
   const handleAnalyze = async () => {
     if (!result.food && !result.drink && !result.dessert) return;
     setIsAnalyzing(true);
-    const data = await callGeminiAnalysis(apiKeys.gemini, result);
+    const data = await callGeminiAnalysis(result);
     setAnalysis(data);
     setIsAnalyzing(false);
   };
@@ -596,34 +550,24 @@ const FoodRandomizerApp = ({ userProfile, onRetakeQuiz, apiKeys, onUpdateKeys })
   const ResultCard = ({ type, title, icon: Icon, item, img, color, isSelected, onToggle }) => {
     const isFav = favorites.some(f => f.name === item);
     const isSlotSpinning = spinningState[type];
-    const hasItem = item && item !== "กำลังเลือก..." && item !== "กำลังโหลด..." && !isSlotSpinning && !String(item).includes("Key");
-    const isMissing = item === "N/A" || item === null || item === "undefined"; 
+    const hasItem = item && item !== "กำลังเลือก..." && item !== "กำลังโหลด..." && !isSlotSpinning && !String(item).includes("Error");
+    const isMissing = item === "N/A" || item === null; 
 
     if (!isSelected) {
         return (
-            <div 
-                onClick={onToggle}
-                className="bg-slate-50 rounded-2xl p-4 border-2 border-dashed border-slate-200 flex flex-col items-center justify-center min-h-[160px] cursor-pointer hover:bg-slate-100 transition-colors opacity-50"
-            >
+            <div onClick={onToggle} className="bg-slate-50 rounded-2xl p-4 border-2 border-dashed border-slate-200 flex flex-col items-center justify-center min-h-[160px] cursor-pointer hover:bg-slate-100 transition-colors opacity-50">
                 <div className="p-3 bg-slate-200 rounded-full text-slate-400 mb-2"><Icon size={24}/></div>
                 <span className="text-sm font-bold text-slate-400">ไม่ได้เลือก {title}</span>
-                <span className="text-[10px] text-slate-400">(แตะเพื่อเปิด)</span>
             </div>
         );
     }
 
     return (
       <div className={`bg-white rounded-2xl shadow-md border-l-4 ${color} overflow-hidden flex flex-col h-full`}>
-        {/* Image Section at Top */}
         <div className="relative h-32 w-full bg-slate-100 flex-shrink-0">
             {hasItem && img ? (
                 <>
-                    <img 
-                        src={img} 
-                        className="w-full h-full object-cover transition-transform duration-700 hover:scale-110" 
-                        alt={String(item)} 
-                        loading="lazy" 
-                    />
+                    <img src={img} className="w-full h-full object-cover transition-transform duration-700 hover:scale-110" alt={String(item)} />
                     <div className="absolute bottom-1 right-2 z-10 text-[8px] text-white/70 bg-black/30 px-1 rounded flex items-center gap-1"><Camera size={8}/> Unsplash</div>
                 </>
             ) : (
@@ -631,32 +575,25 @@ const FoodRandomizerApp = ({ userProfile, onRetakeQuiz, apiKeys, onUpdateKeys })
                     {isMissing ? <Ban size={32}/> : <Icon size={40}/>}
                 </div>
             )}
-            
-            {/* Spinning Overlay */}
             {isSlotSpinning && (
                 <div className="absolute inset-0 bg-slate-100 flex items-center justify-center z-20">
                     <RefreshCw className="animate-spin text-slate-400" size={24}/>
                 </div>
             )}
         </div>
-
-        {/* Content Section */}
         <div className="p-4 flex flex-col flex-1">
             <div className="flex justify-between items-start mb-2">
                 <button onClick={onToggle} className="text-xs font-bold uppercase tracking-wider flex items-center gap-2 text-slate-500 hover:text-red-500">
                     <CheckSquare size={14} className="text-green-500"/> {title}
                 </button>
-                
                 {hasItem && !isMissing && (
                     <div className="flex gap-1">
-                        <button onClick={() => handleRandomizeSlot(type)} className="p-1.5 bg-slate-50 rounded-full text-slate-500 hover:bg-blue-50 hover:text-blue-500 transition-colors" title="สุ่มใหม่"><RefreshCw size={14}/></button>
-                        <button onClick={() => banItem(item)} className="p-1.5 bg-slate-50 rounded-full text-slate-500 hover:bg-red-50 hover:text-red-500 transition-colors" title="ตัดออก"><Ban size={14}/></button>
-                        <button onClick={() => toggleFavorite(type, item, img)} className={`p-1.5 rounded-full transition-colors shadow-sm ${isFav ? 'bg-red-50 text-red-500' : 'bg-slate-50 text-slate-500 hover:text-red-400'}`}><Heart size={14} fill={isFav ? "currentColor" : "none"}/></button>
+                        <button onClick={() => handleRandomizeSlot(type)} className="p-1.5 bg-slate-50 rounded-full text-slate-500 hover:bg-blue-50 transition-colors"><RefreshCw size={14}/></button>
+                        <button onClick={() => toggleFavorite(type, item, img)} className={`p-1.5 rounded-full transition-colors ${isFav ? 'bg-red-50 text-red-500' : 'bg-slate-50 text-slate-500'}`}><Heart size={14} fill={isFav ? "currentColor" : "none"}/></button>
                     </div>
                 )}
             </div>
-
-            <div className={`font-black text-lg md:text-xl leading-tight text-slate-800 ${isMissing ? 'text-slate-400 italic' : ''}`}>
+            <div className={`font-black text-lg leading-tight text-slate-800 ${isMissing ? 'text-slate-400 italic' : ''}`}>
                 {isMissing ? "ไม่มีเมนู" : (item || "รอการสุ่ม...")}
             </div>
         </div>
@@ -673,8 +610,7 @@ const FoodRandomizerApp = ({ userProfile, onRetakeQuiz, apiKeys, onUpdateKeys })
         <div className="max-w-3xl mx-auto flex items-center justify-between">
           <div className="flex items-center gap-2 text-orange-600"><ChefHat size={28} strokeWidth={2.5}/><div><h1 className="text-xl font-black text-slate-900 leading-none">กินไรดี</h1><span className="text-[10px] text-orange-500 font-semibold tracking-wider">Kin-Rai-Dee</span></div></div>
           <div className="flex items-center gap-2">
-            <button onClick={() => setShowKeyModal(true)} className={`p-2 rounded-full ${apiKeys.gemini ? 'bg-blue-100 text-blue-600' : 'bg-red-100 text-red-500 animate-pulse'}`}><Key size={18}/></button>
-            <button onClick={() => setShowFavModal(true)} className="p-2 bg-red-50 text-red-500 rounded-full hover:bg-red-100 relative"><Heart size={18} fill={favorites.length > 0 ? "currentColor" : "none"}/>{favorites.length > 0 && <span className="absolute top-0 right-0 w-2 h-2 bg-red-600 rounded-full animate-ping"/>}</button>
+            <button onClick={() => setShowFavModal(true)} className="p-2 bg-red-50 text-red-500 rounded-full hover:bg-red-100 relative"><Heart size={18} fill={favorites.length > 0 ? "currentColor" : "none"}/></button>
             <button onClick={() => setShowFilters(!showFilters)} className={`p-2 rounded-full relative ${showFilters || allergy || exclusions.length > 0 ? 'bg-orange-100 text-orange-600' : 'bg-slate-100 text-slate-500'}`}><Settings size={20} /></button>
           </div>
         </div>
@@ -686,17 +622,9 @@ const FoodRandomizerApp = ({ userProfile, onRetakeQuiz, apiKeys, onUpdateKeys })
                      <div className="text-[10px] font-bold text-slate-400 uppercase">งบประมาณ</div>
                      <div className="text-sm font-bold text-slate-700">{priceRange.min}-{priceRange.max} บ.</div>
                   </div>
-                  <div className="bg-white p-3 rounded-xl border border-indigo-200 flex-1">
-                     <div className="text-[10px] font-bold text-slate-400 uppercase">รัศมี</div>
-                     <div className="text-sm font-bold text-slate-700">{userProfile.distance || 1} กม.</div>
-                  </div>
                   <button onClick={onRetakeQuiz} className="bg-white p-3 rounded-xl border border-slate-200 text-blue-500"><Edit size={16}/></button>
                 </div>
                 <div><h3 className="text-xs font-bold text-red-600 mb-1">แพ้อาหาร (Allergy)</h3><input value={allergy} onChange={(e)=>setAllergy(e.target.value)} placeholder="เช่น กุ้ง, ถั่วลิสง..." className="w-full px-3 py-2 rounded-lg border border-red-200 text-sm focus:ring-2 focus:ring-red-400 outline-none bg-white"/></div>
-                <div>
-                  <h3 className="text-xs font-bold text-orange-800 mb-1">Ban List</h3>
-                  <div className="flex flex-wrap gap-2">{exclusions.map((ex, idx) => (<span key={idx} className="inline-flex items-center gap-1 px-2 py-1 bg-white border border-slate-200 text-slate-600 rounded text-xs font-medium decoration-slice line-through">{ex} <button onClick={()=>setExclusions(exclusions.filter(e=>e!==ex))}><X size={10} className="hover:text-red-500"/></button></span>))}</div>
-                </div>
              </div>
           </div>
         )}
@@ -708,13 +636,11 @@ const FoodRandomizerApp = ({ userProfile, onRetakeQuiz, apiKeys, onUpdateKeys })
             <h2 className="text-sm font-bold text-slate-400 uppercase tracking-widest mb-1">ร้านอาหารที่เลือก</h2>
             <div className={`text-2xl font-black text-slate-800 flex justify-center items-center gap-2 ${spinningState.shop ? 'animate-pulse opacity-50' : ''}`}><MapPin className="text-orange-500"/> {result.shop || "รอสุ่มร้าน..."}</div>
           </div>
-
           <div className="grid md:grid-cols-3 gap-4">
             <ResultCard type="food" title="อาหารจานหลัก" icon={Utensils} item={result.food} img={result.foodImg} color="border-orange-500" isSelected={selectedTypes.food} onToggle={() => toggleType('food')} />
             <ResultCard type="drink" title="เครื่องดื่ม" icon={Coffee} item={result.drink} img={result.drinkImg} color="border-blue-500" isSelected={selectedTypes.drink} onToggle={() => toggleType('drink')} />
             <ResultCard type="dessert" title="ของหวาน" icon={IceCream} item={result.dessert} img={result.dessertImg} color="border-pink-500" isSelected={selectedTypes.dessert} onToggle={() => toggleType('dessert')} />
           </div>
-
           {analysis && (
             <div className="mt-6 bg-white rounded-2xl p-6 shadow-lg border border-indigo-100 animate-in zoom-in-95">
               <div className="flex items-start gap-4">
@@ -724,41 +650,29 @@ const FoodRandomizerApp = ({ userProfile, onRetakeQuiz, apiKeys, onUpdateKeys })
                   <p className="text-slate-600 italic mb-4">"{analysis.comment}"</p>
                   <div className="flex flex-wrap gap-4">
                     <div className="bg-slate-50 px-3 py-2 rounded-lg border border-slate-100">
-                      <div className="text-xs text-slate-400 font-bold uppercase">พลังงานรวม</div>
+                      <div className="text-[10px] text-slate-400 font-bold uppercase">พลังงานรวม</div>
                       <div className="text-lg font-black text-slate-800">{analysis.calories} <span className="text-xs font-normal">kcal</span></div>
                     </div>
-                    <div className="bg-green-50 px-3 py-2 rounded-lg border border-green-100">
-                      <div className="text-xs text-green-600 font-bold uppercase">คะแนนสุขภาพ</div>
-                      <div className="text-lg font-black text-green-700">{analysis.score}/10</div>
-                    </div>
                   </div>
-                  <div className="mt-3 text-sm text-slate-500 bg-slate-50 p-2 rounded-lg border border-slate-100 flex gap-2"><Info size={16} className="text-blue-400 flex-shrink-0 mt-0.5"/> {analysis.health_tip}</div>
                 </div>
               </div>
             </div>
           )}
-
           <div className="mt-8 flex flex-col items-center gap-4">
             {options.length === 0 ? (
-              <button onClick={handleFetchNearby} disabled={isLocating} className="w-full md:w-auto px-10 py-4 bg-blue-600 text-white rounded-full font-bold shadow-xl shadow-blue-500/30 flex items-center justify-center gap-3 hover:scale-105 transition-transform">{isLocating ? <RefreshCw className="animate-spin"/> : <MapPin className="animate-bounce"/>} ค้นหาร้านจริงรอบตัว (OSM)</button>
+              <button onClick={handleFetchNearby} disabled={isLocating} className="w-full md:w-auto px-10 py-4 bg-blue-600 text-white rounded-full font-bold shadow-xl flex items-center justify-center gap-3">{isLocating ? <RefreshCw className="animate-spin"/> : <MapPin/>} ค้นหาร้านจริงรอบตัว</button>
             ) : (
               <div className="flex flex-col gap-3 w-full items-center">
-                <button onClick={handleRandomizeAll} disabled={spinningState.food || spinningState.shop} className={`w-full md:w-auto px-12 py-5 rounded-full font-black text-xl shadow-xl flex items-center justify-center gap-3 transition-all transform active:scale-95 ${spinningState.shop ? 'bg-slate-400 text-white cursor-not-allowed' : 'bg-gradient-to-r from-orange-500 to-red-600 text-white shadow-orange-500/40'}`}>{spinningState.shop ? <RefreshCw className="animate-spin"/> : <Dices/>} {spinningState.shop ? "กำลังจัดเซ็ต..." : "สุ่มครบเซ็ต!"}</button>
-                {/* Always show Analyze button if we have results (even from pool key) */}
-                {result.food && selectedTypes.food && !String(result.food).includes("Key") && !spinningState.shop && !analysis && (
-                  <button onClick={handleAnalyze} disabled={isAnalyzing} className="text-sm font-bold text-indigo-600 bg-indigo-50 px-4 py-2 rounded-full hover:bg-indigo-100 flex items-center gap-2 transition-colors">
+                <button onClick={handleRandomizeAll} disabled={spinningState.shop} className={`w-full md:w-auto px-12 py-5 rounded-full font-black text-xl shadow-xl flex items-center justify-center gap-3 transition-all ${spinningState.shop ? 'bg-slate-400 text-white' : 'bg-gradient-to-r from-orange-500 to-red-600 text-white'}`}>{spinningState.shop ? <RefreshCw className="animate-spin"/> : <Dices/>} สุ่มครบเซ็ต!</button>
+                {result.food && selectedTypes.food && !spinningState.shop && !analysis && (
+                  <button onClick={handleAnalyze} disabled={isAnalyzing} className="text-sm font-bold text-indigo-600 bg-indigo-50 px-4 py-2 rounded-full flex items-center gap-2 transition-colors">
                     {isAnalyzing ? <RefreshCw className="animate-spin" size={14}/> : <Activity size={14}/>} {isAnalyzing ? "กำลังวิเคราะห์..." : "วิเคราะห์โภชนาการ (AI)"}
                   </button>
                 )}
-                {!spinningState.shop && <button onClick={handleFetchNearby} className="text-xs text-slate-400 font-bold flex items-center gap-1 hover:text-blue-500 transition-colors"><RefreshCw size={12}/> รีเซ็ตพิกัด / หาร้านใหม่</button>}
+                {!spinningState.shop && <button onClick={handleFetchNearby} className="text-xs text-slate-400 font-bold flex items-center gap-1"><RefreshCw size={12}/> หาร้านใหม่</button>}
               </div>
             )}
           </div>
-        </div>
-
-        <div className="bg-white rounded-2xl p-5 border border-slate-100 shadow-sm mt-8">
-          <div className="flex justify-between items-center mb-3"><h3 className="font-bold text-slate-700 text-sm">ร้านอาหารจริงในระยะ {userProfile.distance || 1} กม. ({options.length})</h3></div>
-          <div className="flex flex-wrap gap-2 max-h-[150px] overflow-y-auto">{options.length === 0 ? <span className="text-xs text-slate-400">ยังไม่ได้ค้นหา...</span> : options.map((opt, i) => (<span key={i} className="px-2 py-1 bg-slate-50 border border-slate-100 text-slate-600 rounded text-xs font-medium">{opt}</span>))}</div>
         </div>
       </main>
     </div>
@@ -769,14 +683,14 @@ const FoodRandomizerApp = ({ userProfile, onRetakeQuiz, apiKeys, onUpdateKeys })
 const App = () => {
   const [appState, setAppState] = useState('welcome');
   const [userProfile, setUserProfile] = useState(null);
-  const [apiKeys, setApiKeys] = useState({ gemini: '', unsplash: '' });
+  const [apiKeys, setApiKeys] = useState({ unsplash: '' });
 
   if (appState === 'welcome') return (
-    <div className="min-h-screen bg-slate-50 flex items-center justify-center p-6">
-      <div className="max-w-sm w-full text-center">
+    <div className="min-h-screen bg-slate-50 flex items-center justify-center p-6 text-center">
+      <div className="max-w-sm w-full">
         <div className="inline-flex p-6 bg-orange-100 text-orange-600 rounded-[2.5rem] mb-8 shadow-inner"><ChefHat size={64} /></div>
         <h1 className="text-4xl font-black text-slate-900 mb-4">กินไรดี?</h1>
-        <button onClick={() => setAppState('quiz')} className="w-full py-5 bg-slate-900 text-white rounded-[1.5rem] font-bold text-lg shadow-2xl hover:scale-105 transition-transform flex items-center justify-center gap-2">เริ่มสำรวจความต้องการ <ArrowRight/></button>
+        <button onClick={() => setAppState('quiz')} className="w-full py-5 bg-slate-900 text-white rounded-[1.5rem] font-bold text-lg shadow-2xl flex items-center justify-center gap-2">เริ่มสำรวจความต้องการ <ArrowRight/></button>
       </div>
     </div>
   );
